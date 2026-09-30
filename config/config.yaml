@@ -1,0 +1,16 @@
+groups:
+  allowed: [756155087]  # 填写数字群号，例如 [123456789]
+timezone: Asia/Shanghai
+websocket:
+  host: 127.0.0.1
+  port: 8789
+  action_timeout: 15
+deepseek:
+  model: deepseek-flash
+  thinking: false
+  timeout: 60
+  retries: 2  # API 与模型输出共用的重试预算，不含初次请求
+  max_messages: 1000
+  max_input_chars: 60000
+logging:
+  level: INFO
