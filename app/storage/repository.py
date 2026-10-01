@@ -3,14 +3,15 @@ from collections.abc import Callable
 from typing import Any
 
 from app.attachments.models import GroupFileReference
-from app.config import AttachmentConfig
+from app.config import AttachmentConfig, TriageConfig
 from app.storage.db import Database
 from app.storage.inbox_repository import ingest_files
 
 
 class Repository:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, triage_config: TriageConfig | None = None) -> None:
         self.db = db
+        self.triage_config = triage_config or TriageConfig()
 
     async def query(self, sql: str, args: tuple = ()) -> list[dict[str, Any]]:
         async with self.db.transaction() as connection:
@@ -44,6 +45,10 @@ class Repository:
                 tuple(record[column] for column in columns),
             ) as cursor:
                 inserted = cursor.rowcount == 1
+                internal_id = cursor.lastrowid
+            if inserted and self.triage_config.enabled and group_policy.mode in {"inbox", "priority"} and group_policy.inbox_enabled:
+                await connection.execute("INSERT INTO triage_message_state(message_id,self_id,group_id,status,created_at) "
+                    "VALUES (?,?,?,'pending',?)", (internal_id, record["self_id"], record["group_id"], time.time()))
             timestamps = {"last_received_at": record["received_time"],
                           "last_message_event_time": record["event_time"]}
             if record["ingest_source"] == "realtime":

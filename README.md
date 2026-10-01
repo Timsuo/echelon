@@ -30,7 +30,7 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 
 `qq` `napcat` `onebot` `llm` `ai` `message-aggregation` `smart-inbox` `notification` `summarization` `automation`
 
-以上描述是项目愿景；分类、优先级、标签和自动投递尚未实现，具体以 Current Features 和 Roadmap 为准。
+以上描述包含项目愿景；分类、优先级、标签已在 Phase 3 实现，自动投递仍未实现，具体以 Current Features 和 Roadmap 为准。
 
 ## Why Echelon
 
@@ -57,13 +57,22 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 - Group Policy：`summary_only`、`inbox`、`priority`、`ignore`，默认只总结。
 - `/groups`、`/group`、`/config` → 配置提案 → `/confirm` 或 `/cancel`；自然语言后台解析。
 
-### Phase 2.5 — Reliability / History Recovery / Command UX — Current
+### Phase 2.5 — Reliability / History Recovery / Command UX — Implemented
 
 - `/config` 只将首个独立数字 token 作为显式群号，正文的日期、天数和 MB 数字不影响唯一别名匹配。
 - 断连/停机缺口持久化、重连有限回补、在线低频重叠核验、手动 `/sync`。
 - `ingest_source` 区分实时与历史；`/coverage` 展示保守覆盖状态，总结对未确认缺口添加 Python 生成的警告。
 - `/help` 分类首页及全部命令详情来自统一 CommandSpec，与路由共用注册信息。
-- 所有恢复均为 best effort，没有完整离线重放保证，也未实现 Phase 3 智能分类或 Phase 4 紧急提醒。
+- 所有恢复均为 best effort，没有完整离线重放保证，未实现 Phase 4 紧急提醒。
+
+### Phase 3 — Intelligent Triage & Personal Preferences — Current
+
+- inbox / priority 群的新消息持久排队，经 debounce 和有界批处理后交给 LLM 聚合成 0..10 个事项。
+- 固定分类、优先级与标签，行动要求、截止时间、简短判断依据；合并近期同群条目与已有文件条目。
+- `/prefs`、`/pref` → typed proposal → 共用 `/confirm`、`/cancel`，偏好按账号隔离。
+- 来源 ID、合并 ID、严格 Schema 与相对日期校验；结果和来源归属同事务应用。
+- Coverage 警告由 Python 决定，保留历史 event_time；revision 为 Phase 4 投递去重准备。
+- **分类结果仅进入 Inbox，不发送即时提醒，不实现 Heartbeat 或 Scheduled Digest。**
 
 ## Architecture
 
@@ -244,7 +253,7 @@ SQLite 位于 `data/messages.db`，自动初始化 WAL、NORMAL、foreign_keys �
 - 群记录只读，不删除、撤回、禁言、踢人，也不自动处理好友或入群请求。
 - 模型没有工具、QQ 接口或凭据访问权限。聊天记录始终作为不可信数据，system prompt 明确禁止执行其中指令。
 - 输出必须通过严格 JSON schema 和引用消息 ID 检查，才进入 renderer；防注入不意味着总结不会出现事实错误。
-- 非法模型回复按要求写入轮转日志，配置中的密钥会被脱敏。日志可能含群聊内容，应和数据库一起限制本机访问权限。
+- 所有 LLM JSON / Schema 校验失败只记录 schema 名、响应长度、结束原因与错误类型；不记录群聊原文、模型完整回复、偏好全文或密钥。旧版产生的日志不会自动重写，应限制本机访问权限。
 - SQLite 中 `UNIQUE(self_id,group_id,message_id)` 防重复；原始事件 JSON 和标准化内容同时保存。
 - 任务通过 SQLite 原子 UPDATE…RETURNING 认领，两个数据库连接不会领取同一任务。当前只支持单进程、单总结 worker。
 - 启动时在独占进程锁内把遗留 running 任务恢复成 queued。中断前已经发出的 DeepSeek 请求可能被重新调用并产生额外费用。
@@ -257,7 +266,7 @@ SQLite 位于 `data/messages.db`，自动初始化 WAL、NORMAL、foreign_keys �
 - 总结、completed 状态和待发通知在同一事务保存；QQ 断开后通知保留，重连自动继续发送。completed 表示结果已保存，不等于已经送达。
 - 私聊必须收到 echo 对应的成功响应才标记送达。若 QQ 已送达但确认丢失，重试可能导致重复私聊，无法实现端到端 exactly-once；消息带任务编号便于识别。
 - 通知按顺序发送；管理员私聊不可达可能阻塞后续通知，`/status` 的回复也会排队。请检查 `send_private_msg failed` 日志和 ADMIN_QQ / 好友关系。
-- 断线期间未收到的消息、程序未运行时的历史消息不会主动补拉。OneBot 推送没有本项目可依赖的持久重放保证；磁盘满或数据库不可写会记错误并断开连接，**无法保证尚未落盘的事件可恢复**。
+- 断线和停机窗口会触发有限历史回补；OneBot 推送没有本项目可依赖的持久重放保证。磁盘满或数据库不可写会记错误并断开连接，**无法保证尚未落盘的事件可恢复**。
 - WAL + synchronous=NORMAL 适合长期运行，但突然断电仍可能丢失最近提交；重要数据应定期备份。停服后复制整个 data 目录最简单，运行中用 SQLite backup API，不要只复制 messages.db 而忽略 WAL。
 - SQLite 和通知历史不自动清理；持续运行应监测磁盘容量。日志已轮转。
 - `/status` 的 DeepSeek Healthy/Failed 表示最近一次实际调用结果，不会额外发起探测；最后收到消息指最后一次接收白名单群消息的本机时间。
@@ -350,7 +359,7 @@ start.bat
   NapCat 若返回其他 CDN/数字 IP 地址会安全失败，应针对实际版本审查适配，不要放开任意 URL。
 - 接收 group_upload 通知时，如果没有 OneBot message_id，生成带 notice 命名空间的稳定 ID 保存原始事件。
   相同 file_id 的消息/通知复用附件和自动 InboxItem，并关联各自内部 messages.id；无稳定 file_id 时不能保证跨事件形式识别同一文件。
-- 仅当群策略 inbox_enabled 时为每个新文件创建一个 InboxItem，普通文字不自动创建。`InboxRepository.create_item` 可明确聚合多个消息/附件；关联表复合外键禁止跨账号关联。
+- 仅当群策略 inbox_enabled 时为每个新文件创建基础 InboxItem；Phase 3 后台聚合可复用该条目并关联普通文字。`InboxRepository.create_item` 可明确聚合多个消息/附件；关联表复合外键禁止跨账号关联。
 - 升级时在现有迁移事务中幂等创建 attachments、inbox_items、inbox_item_messages、inbox_item_attachments，
   并给 private_outbox 增加文件类型/账号/附件引用/取消状态；原有行及 Phase 1 数据保留。
 - **附件长期保存，会持续占用磁盘**；本阶段无自动删除。未来将增加 retention policy。归档 Inbox 不释放磁盘空间。
@@ -377,8 +386,8 @@ summary_only 可只保存附件元数据并标记 skipped；ignore 在业务入�
 已开始的 API 请求或文件传输可能完成；下载 worker 在执行前重新检查策略。
 
 **Priority Watch policy is stored, but automatic urgent alerts are planned for Phase 4.**
-Phase 2.5 的 priority 模式仅额外提高历史核验频率（默认2分钟），不进行 LLM 优先级判断或即时提醒。
-Phase 2 没有 LLM triage，也没有自动紧急通知。
+priority 模式提高历史核验频率（默认2分钟），Phase 3 还缩短批量分类等待时间（默认60秒），但不发送即时提醒。
+自动 triage 要求 mode 为 inbox / priority 且 inbox_enabled=true；summary_only 和 ignore 不参与。
 
 `/groups` 列出当前账号白名单群与策略；`/group <群号>` 查看单群。
 群名称使用本地 alias，不自动查询 QQ 群列表；同名、多个候选或“这个群”没有唯一指代时，返回候选并要求指定群号，不猜测。
@@ -425,6 +434,8 @@ Python 先从本账号白名单/别名唯一解析目标，LLM 输出中不允�
 Echelon 在本地保存 QQ group messages、metadata、attachments、summaries 和 inbox items。
 Phase 1 summary 会将对应窗口的群聊文本发送给配置的 DeepSeek API provider。
 自然语言 `/config` 会将该配置文本发送给同一 provider，本地还保存配置解析请求、提案与群策略；明确格式命令不调用 API。
+Phase 3 自动 triage 会发送相关消息文本、发送者 ID、原事件时间、附件元数据、近期同群条目与个人偏好；`/pref` 会发送该偏好请求文本。
+本地保存 triage job、结构化结果、归属状态、个人偏好及提案；LLM 校验失败日志不保存完整模型输出。
 **Phase 2 附件 binary 内容不会发送给 DeepSeek**：不读取文档内容、不 OCR、不解压、不进行图片或语音理解。
 新事件持久化时移除已识别 file segment / CQ file / group_upload 的临时 URL；仅 pending 附件在内存中短期缓存直链。
 升级前原始事件 JSON 可能已有 URL，本次不批量改写历史数据；恢复与转发不依赖这些旧地址。日志不记录完整 URL 或文件内容。
@@ -462,13 +473,15 @@ Phase 1 summary 会将对应窗口的群聊文本发送给配置的 DeepSeek API
 | `/coverage` | 采集缺口、恢复覆盖及周期核验状态 |
 | `/sync [群号]` | 对全部非 ignore 白名单群或指定群建立有限历史核验任务 |
 | `/summary <时间窗口>` | 总结开启 Summary 的群；支持 30m、2h、today |
-| `/inbox [unread]` | 非归档条目或仅未读条目 |
+| `/inbox [unread\|high\|critical\|deadline\|action]` | 非归档条目及简单筛选 |
 | `/detail <id>` | 查看 Inbox 内容及附件序号，unread → read |
 | `/archive <id>` | 归档，保留源消息与附件 |
 | `/file <inbox_id> <attachment_index>` | 将已下载且安全的附件发给 ADMIN_QQ |
 | `/groups` | 当前账号白名单群的策略列表 |
 | `/group <群号>` | 查看单群策略 |
 | `/config <群号或别名> <配置意图>` | 生成 Before → After 配置提案 |
+| `/prefs` | 查看当前账号的个人分类偏好 |
+| `/pref <自然语言>` | 生成个人偏好变更提案 |
 | `/confirm <提案ID>` | 确认未过期且未发生冲突的提案 |
 | `/cancel <提案ID>` | 取消待确认提案，不修改策略 |
 
@@ -548,7 +561,7 @@ NapCat 断线期间只记录本地状态，不尝试通过离线 QQ 即时提醒
 进程恰在单条入库后、任务统计落盘前崩溃时，恢复后的新增计数可能低估，消息仍通过唯一键保留。
 
 `/summary` 与当前账号/目标群的未确认 gap 相交时，Python renderer 增加“数据覆盖警告”，不阻止摘要，也不依赖 LLM 写警告。
-其他群的良好恢复结果不能替该群证明完整；`HistoryRepository.unresolved` 同样可供未来 Inbox / triage 按源消息时间查询。
+其他群的良好恢复结果不能替该群证明完整；Phase 3 使用 `HistoryRepository.unresolved` 按候选消息原时间查询，并在原子应用结果时再次检查。
 
 ### 来源时间与迁移
 
@@ -575,14 +588,136 @@ runtime_state 区分 last_received_at、last_message_event_time（最大消息�
 9. 正常停止并重启 Python，验证 service_stop 窗口与恢复；在测试环境模拟异常退出，验证 running → queued 和推断离线窗口。
 10. 验证别名加14天/日期/100MB可确定正确群，但不会新增自动到期或每群大小配置能力；核对提案后再确认。
 
+## Intelligent Triage
+
+实时与历史消息继续使用相同的 EventProcessor / Repository。新插入、且群策略允许 triage 的消息，
+在同一个消息事务里写入 `triage_message_state`；消息重复不会重复取得归属。
+后台 TriageWorker 按账号、群和有界窗口建立 `triage_jobs` / `triage_job_messages`，模型调用在事务外。
+没有关键词门槛：每条符合策略的新消息都进入持久 pending 状态，普通聊天由模型明确 ignored，而不是本地关键词永久丢弃。
+关闭 triage 时不登记新消息；策略临时关闭时已存在 pending 保留，重新开启后可继续。已领取但策略变更的任务安全失败。
+
+```yaml
+triage:
+  enabled: true
+  inbox_debounce_seconds: 180
+  priority_debounce_seconds: 60
+  inbox_max_wait_seconds: 600
+  priority_max_wait_seconds: 180
+  max_messages_per_candidate: 100
+  max_input_chars: 40000
+  max_span_seconds: 3600
+  retry_count: 2
+```
+
+持续聊天也会在 hard max wait 到达时封批；消息数、源文本预算或原消息时间跨度达到边界时提前分批。
+max_messages 范围1–200，max_input_chars 12000–100000（包含 system prompt），max_span 60–86400秒，额外重试0–5次。
+debounce 范围1–3600秒，max_wait 1–86400秒且不能小于对应 debounce。配置非法时启动失败。
+批次先将约一半字符预算留给消息；最终序列化请求仍检查总上限，先移除末尾可选合并候选，不截断源消息。
+单条超大消息或剩余上下文仍超限时任务 failed，源消息保留；本阶段没有手动重新分类命令。
+
+每个批次可生成0–10个条目，所有源 ID 必须被引用或明确 ignored。非法分类、标签、伪造来源和合并目标都拒绝。
+最多提供10个同群近期非 archived 条目，优先包含已关联本批消息的文件条目；普通合并候选限最近7天。
+Python 会复用本批已关联的未分类文件条目；合并多个文件占位条目时转移关联并归档冗余占位条目，不删除来源或附件。
+模型选择的目标在应用时再次验证账号、群、归档状态及 revision，避免覆盖管理员在推理期间的操作。
+
+结果、Inbox 创建/更新、来源与附件关联、标签、message state、job completed 在单事务应用，失败全部回滚。
+模型输出错误和瞬时 API 故障使用持久任务预算，默认最多3次；Triage SDK 内部不再次叠加重试。
+进程重启 running → queued，保留 ownership 和 attempts；中断的请求可能产生额外计费，但已完成结果不重复应用。
+长度超限、策略/账号变更、应用约束冲突直接失败，failed 消息不会伪装成 ignored。采集、附件、历史 worker 继续运行。
+**智能分类仅更新 Inbox，不创建主动提醒 outbox。** 现有命令回复、总结和采集恢复报告仍保持原行为。
+
+### Phase 3 Migration and Revision
+
+现有迁移事务幂等创建 `triage_jobs`、`triage_job_messages`、`triage_message_state`、`triage_preferences`、
+`inbox_item_labels` 和单行 `triage_settings`。后者保存首次升级的 `triage_start_at`；迁移不扫描旧消息创建分类任务。
+仅升级后新插入且策略允许的消息登记 ownership，包含新回补的旧事件；重复回补已有旧记录不会触发批量分类。
+messages.id 作为稳定 source ID，关联约束同时包含 self_id/group_id，防止跨账号或跨群归属。
+
+inbox_items 增加 revision（旧行默认1）、model_priority、action_required、action_text、triaged_at、triage_model、coverage_status。
+title、summary、category、priority、labels、action 或 deadline 实质变化才增加 revision；只读 `/detail` 标记 read 不增加。
+`model_priority` 保存模型结果；当前最终 priority 与其相同，偏好通过模型上下文起作用，不另加隐藏的规则提权。
+配置请求与提案增加 kind，旧行默认 group_policy；triage_preferences 复用原 `/confirm`、`/cancel` 分发与过期机制。
+迁移失败回滚，无需删除 messages.db。升级前建议正常停服并备份整个 data。
+
+## Personal Preferences
+
+```text
+/prefs
+/pref 考试和调课对我很重要
+/pref 123456789 是老师，他的消息需要重点关注
+/pref 讲座通常是低优先级
+/pref 课程资料正常优先级即可
+```
+
+支持 important_keywords、low_priority_keywords、important_senders、category_priority_preferences。
+每类关键词最多30个、每个最多40字；重要发送者最多30个；分类偏好只接受固定10类与4种优先级。
+默认全部为空；偏好按 self_id 保存，作为对该用户重要性的上下文，不作为消息丢弃过滤器。
+
+`/pref` → 后台严格 PreferenceIntent → Python 校验明确提及的关键词/发送者/分类 → Before → After 提案 → `/confirm <id>`。
+10分钟内可 `/cancel <id>`，未确认绝不修改；重复确认幂等、过期拒绝、已变更字段使旧提案失效。
+只应用显示的差异，不修改 GroupPolicy、allowlist、文件路径或通知时间。普通私聊不触发偏好配置。
+偏好只影响之后执行的分类，不自动重新分类已有 Inbox。模型仍可能误解意图，确认前请核对 diff。
+
+## Priority Semantics
+
+| 值 | 含义 |
+| --- | --- |
+| critical | 极少使用：明显时间紧迫，遗漏会有明显后果 |
+| high | 需要重点留意或近期行动 |
+| normal | 值得保留，无需立即处理 |
+| low | 信息价值较低但仍值得保留 |
+
+纯聊天通常不创建条目，不用大量 low 条目复制群聊。**Phase 3 会分类，但不会即时通知。**
+`/inbox high` 和 `/inbox critical` 精确筛选对应优先级；`/inbox action` 筛选需要行动的条目。
+
+## Categories and Labels
+
+固定分类：announcement（一般通知）、schedule（时间地点/调课）、assignment（作业报告）、exam（考试）、
+material（资料）、administrative（行政）、action_request（回复/确认/报名）、project（协作）、discussion（有价值讨论）、other。
+固定标签：deadline、schedule_change、location_change、attendance、submission、file、requires_reply、
+requires_preparation、exam、assignment、administrative。模型不能增加自由标签。
+`/detail` 显示分类、优先级、标签、行动、置信度、简短事实依据、附件和覆盖提示；reason 不要求或展示内部推理过程。
+
+## Deadline Semantics
+
+每条输入明确包含原始 event_time、带时区 local_time 和 ingest_source，使用配置的 Echelon timezone。
+“今天/明天/下周四”基于原消息时间，绝不以恢复接收时间或 API 调用时间为基准。
+日期有歧义时 deadline_at=null，保留 deadline_text；有日期时必须返回带时区 ISO8601，再转 Unix timestamp 保存并按配置时区显示。
+Python 额外核验今天、明天、后天、大后天、下周某日与引用消息原日期是否一致；跨多个不同基准日时要求保持 null。
+其他自然语言日期仍依赖模型理解，不能承诺无误；请在 `/detail` 核对。
+`/inbox deadline` 同时包含具体时间和仅有截止文字的条目。action_required=true 必须有 action_text，false 时必须为 null。
+
+## Coverage and Triage
+
+分类前后使用候选原时间范围查询未确认 gap，partial / unknown / failed / pending / running 不阻止分类，
+但由 Python 将 coverage_status 设为 warning，并在 `/inbox`、`/detail` 提示可能缺少上下文。
+合并既有 warning 条目时不会悄悄清除警告；本阶段不自动重新评估已存条目。
+无已知缺口使用 no_known_gap，**不表示绝对完整**；likely_covered 仍只是有限时间范围证据。
+历史消息保持 event_time 和 ingest_source，未来 Phase 4 必须按事件原时间及 revision 决定投递，不能把 received_time 当新事件时间。
+附件只提供 filename、file_size、download_status 和 source ID，不读 binary、路径、临时 URL 或文件内容。
+
+## Phase 3 Manual Verification
+
+1. 正常停止旧实例，备份 data；启动 Echelon，检查迁移和 worker 启动，NapCat 保持原连接配置。
+2. `/prefs`；`/pref 考试和调课对我很重要`，核对提案，`/confirm <id>` 后再 `/prefs`。
+3. `/config <课程群号> mode inbox`，确认提案；白名单不得由模型扩张。
+4. 群内连续发送“下周实验课改到302”“时间还是周四下午”“记得带实验报告”。
+5. 等待默认180秒静默期（持续发言最多等待600秒封批），再加模型处理时间；priority 对应60/180秒。
+6. `/inbox`、`/detail <id>`，检查合理聚合、category、priority、labels、action、deadline；应无自动紧急私聊。
+7. 上传课程文件并补一句用途说明，等分类后检查复用文件条目、来源与附件关联，`/file <id> 1` 仍可转发。
+8. 测试 `/inbox high`、`/inbox critical`、`/inbox deadline`、`/inbox action`。
+9. summary_only 群发相同普通消息，不应创建智能 Inbox；ignore 群不进入采集。
+10. 按 Phase 2.5 流程断连回补，确认旧消息的相对日期使用原 event_time，缺口条目有 coverage warning。
+11. 回归 `/summary 30m`、`/sync`、`/coverage`、GroupPolicy 提案和附件转发；测试服务重启后的 running 任务恢复。
+
 ## Roadmap
 
 | 阶段 | 状态 | 范围 |
 | --- | --- | --- |
 | Phase 1 — Message Collection & Summary | ✅ Implemented | 消息采集、持久化、私聊总结 |
 | Phase 2 — Attachments & Inbox Foundation | ✅ Implemented | 附件、Inbox、管理员文件转发、Group Policy、Conversational Configuration |
-| Phase 2.5 — Reliability / History Recovery / Command UX | Current | 缺口检测、有限历史回补、周期核验、覆盖警告、统一帮助 |
-| Phase 3 — Intelligent Triage | Planned | categories、priorities、labels、deadline extraction、personal preferences |
+| Phase 2.5 — Reliability / History Recovery / Command UX | ✅ Implemented | 缺口检测、有限历史回补、周期核验、覆盖警告、统一帮助 |
+| Phase 3 — Intelligent Triage & Personal Preferences | Current | 消息聚合、categories、priorities、labels、deadline、personal preferences |
 | Phase 4 — Delivery Automation | Planned | heartbeat、urgent alert、scheduled digest、quiet hours |
 | Phase 5 — Web Inbox | Planned | browser UI、search、filtering、archive、attachment management |
 

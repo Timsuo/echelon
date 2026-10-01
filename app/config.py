@@ -3,7 +3,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,6 +80,25 @@ class HistoryConfig(StrictConfig):
                 "summary_only": self.summary_only_interval_seconds}.get(mode)
 
 
+class TriageConfig(StrictConfig):
+    enabled: bool = True
+    inbox_debounce_seconds: int = Field(default=180, ge=1, le=3600)
+    priority_debounce_seconds: int = Field(default=60, ge=1, le=3600)
+    inbox_max_wait_seconds: int = Field(default=600, ge=1, le=86400)
+    priority_max_wait_seconds: int = Field(default=180, ge=1, le=86400)
+    max_messages_per_candidate: int = Field(default=100, ge=1, le=200)
+    max_input_chars: int = Field(default=40000, ge=12000, le=100000)
+    max_span_seconds: int = Field(default=3600, ge=60, le=86400)
+    retry_count: int = Field(default=2, ge=0, le=5)
+
+    @model_validator(mode="after")
+    def wait_bounds(self):
+        for mode in ("inbox", "priority"):
+            if getattr(self, mode + "_max_wait_seconds") < getattr(self, mode + "_debounce_seconds"):
+                raise ValueError("triage max_wait must be >= debounce")
+        return self
+
+
 class AppConfig(StrictConfig):
     groups: Groups = Field(default_factory=Groups)
     timezone: str = "Asia/Shanghai"
@@ -89,6 +108,7 @@ class AppConfig(StrictConfig):
     attachments: AttachmentConfig = Field(default_factory=AttachmentConfig)
     inbox: InboxConfig = Field(default_factory=InboxConfig)
     history: HistoryConfig = Field(default_factory=HistoryConfig)
+    triage: TriageConfig = Field(default_factory=TriageConfig)
 
     @field_validator("timezone")
     @classmethod

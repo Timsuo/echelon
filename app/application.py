@@ -30,6 +30,8 @@ from app.storage.history_repository import HistoryRepository
 from app.storage.inbox_repository import InboxRepository
 from app.storage.policy_repository import PolicyRepository
 from app.storage.repository import Repository
+from app.storage.triage_repository import TriageRepository
+from app.triage.worker import TriageWorker
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +66,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             configure_logging(root / "logs", settings.logging.level, credentials)
             logger.info("Service starting")
             await database.open()
-            repository = Repository(database)
+            repository = Repository(database, settings.triage)
             history = HistoryRepository(repository, settings)
             await history.startup()
             await repository.recover()
@@ -86,6 +88,9 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             policies = PolicyRepository(database, settings.groups.allowed)
             await policies.recover()
             configuration_worker = ConfigurationWorker(policies, client)
+            triage_repository = TriageRepository(repository, settings)
+            await triage_repository.recover()
+            triage_worker = TriageWorker(triage_repository, client)
             service = SummaryService(repository, client, settings)
             app.state.services = Services(credentials, repository, actions, events, history)
             tasks = [asyncio.create_task(run_worker(repository, service), name="summary-worker"),
@@ -94,6 +99,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             tasks.append(asyncio.create_task(attachment_worker.run(), name="attachment-worker"))
             tasks.append(asyncio.create_task(configuration_worker.run(), name="configuration-worker"))
             tasks.append(asyncio.create_task(history_worker.run(), name="history-worker"))
+            tasks.append(asyncio.create_task(triage_worker.run(), name="triage-worker"))
             if not settings.groups.allowed:
                 logger.warning("Group whitelist is empty; no group messages will be stored")
             if client.client is None:

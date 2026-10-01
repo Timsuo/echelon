@@ -10,6 +10,8 @@ from app.llm.prompts import SYSTEM_PROMPT
 from app.llm.schemas import SummaryData
 from app.policies.models import ConfigIntent
 from app.policies.parser import SYSTEM_PROMPT as CONFIG_PROMPT
+from app.triage.models import PreferenceIntent, TriageResult
+from app.triage.prompts import PREFERENCE_PROMPT, TRIAGE_PROMPT
 
 logger = logging.getLogger(__name__)
 RETRYABLE_FINISH_REASONS = frozenset({"insufficient_system_resource", "aborted"})
@@ -45,13 +47,22 @@ class DeepSeekClient:
     async def parse_config(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> ConfigIntent:
         return await self._generate(text, CONFIG_PROMPT, ConfigIntent, on_retry)
 
+    async def parse_preferences(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> PreferenceIntent:
+        return await self._generate(text, PREFERENCE_PROMPT, PreferenceIntent, on_retry)
+
+    async def triage(self, text: str) -> TriageResult:
+        # Persistent job owns the retry budget; do not multiply it by SDK/output retries.
+        async def no_retry() -> None:
+            return None
+        return await self._generate(text, TRIAGE_PROMPT, TriageResult, no_retry, retries=0)
+
     async def _generate[T: BaseModel](self, text: str, system: str, schema: type[T],
-                                       on_retry: Callable[[], Awaitable[None]]) -> T:
+                                       on_retry: Callable[[], Awaitable[None]], *, retries: int | None = None) -> T:
         if self.client is None:
             raise SummaryError("未配置 DEEPSEEK_API_KEY")
         try:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(self.config.retries + 1),
+                stop=stop_after_attempt((self.config.retries if retries is None else retries) + 1),
                 wait=wait_exponential(multiplier=1, min=1, max=30),
                 retry=retry_if_exception(retryable), reraise=True,
             ):
@@ -87,11 +98,8 @@ class DeepSeekClient:
                     try:
                         result = schema.model_validate_json(raw)
                     except ValidationError as error:
-                        # %r keeps newlines escaped; shared formatter redacts configured secrets.
-                        if schema is SummaryData:
-                            logger.error("DeepSeek invalid JSON/schema raw_response=%r", raw)
-                        else:
-                            logger.error("DeepSeek invalid configuration schema response_length=%s", len(raw))
+                        logger.error("DeepSeek schema validation failed schema=%s response_length=%s "
+                                     "finish_reason=stop error_class=%s", schema.__name__, len(raw), type(error).__name__)
                         raise RetryableModelOutputError("模型返回 JSON 不合法或不符合 Schema") from error
                     logger.info("DeepSeek API request succeeded")
                     return result

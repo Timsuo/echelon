@@ -4,6 +4,7 @@ import logging
 from app.llm.deepseek import DeepSeekClient, SummaryError
 from app.policies.parser import ConfigIntentParser
 from app.storage.policy_repository import PolicyRepository
+from app.storage.preference_repository import PreferenceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,10 @@ class ConfigurationWorker:
 
     async def execute(self, request: dict) -> None:
         try:
+            if request.get('kind') == 'triage_preferences':
+                intent = await self.llm.parse_preferences(request['input_text'], lambda: self.repository.retry(request['id']))
+                await PreferenceRepository(self.repository).propose(request, intent)
+                return
             self.repository.check_group(request["group_id"])
             intent = await self.llm.parse_config(request["input_text"], lambda: self.repository.retry(request["id"]))
             ConfigIntentParser.validate_intent(intent, request["input_text"])

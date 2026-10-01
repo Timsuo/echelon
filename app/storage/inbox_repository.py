@@ -104,8 +104,14 @@ class InboxRepository:
             (status, error, path, sha256, time.time() if status == "downloaded" else None, size,
              time.time() + min(30, 2 ** attachment["attempts"]), attachment["self_id"], attachment["id"]))
 
-    async def list_items(self, self_id: int, unread: bool, limit: int) -> list[dict]:
+    async def list_items(self, self_id: int, unread: bool, limit: int, filter_by: str = "") -> list[dict]:
         condition = "status='unread'" if unread else "status!='archived'"
+        filters = {"": "", "high": " AND priority='high'", "critical": " AND priority='critical'",
+                   "deadline": " AND (deadline_at IS NOT NULL OR deadline_text IS NOT NULL)",
+                   "action": " AND action_required=1"}
+        if filter_by not in filters:
+            raise ValueError("Invalid Inbox filter")
+        condition += filters[filter_by]
         return await self.query(f"SELECT * FROM inbox_items WHERE self_id=? AND {condition} ORDER BY id DESC LIMIT ?",
                                 (self_id, limit))
 
@@ -120,6 +126,9 @@ class InboxRepository:
             if row is None:
                 return None
             result = dict(row)
+            async with connection.execute("SELECT label FROM inbox_item_labels WHERE inbox_item_id=? AND self_id=? ORDER BY label",
+                                           (item_id, self_id)) as cursor:
+                result['labels'] = [row['label'] for row in await cursor.fetchall()]
             async with connection.execute(
                 "SELECT a.* FROM attachments a JOIN inbox_item_attachments l ON a.id=l.attachment_id "
                 "AND a.self_id=l.self_id WHERE l.inbox_item_id=? AND l.self_id=? ORDER BY a.id",

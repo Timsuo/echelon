@@ -104,17 +104,25 @@ class PolicyRepository:
                 return "该提案已处理：" + row["status"]
             if row["expires_at"] <= time.time():
                 await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
-                return "配置提案已过期，请重新提交 /config。"
+                return "配置提案已过期，请重新提交 /config 或 /pref。"
             if confirm:
                 data = json.loads(row["intent_json"])
-                self.check_group(data["group_id"])
-                current = await read_policy(connection, self_id, data["group_id"])
-                if any(getattr(current, key) != value for key, value in data["before"].items()):
+                if row['kind'] == 'triage_preferences':
+                    from app.storage.preference_repository import apply_preference_proposal
+                    applied = await apply_preference_proposal(connection, self_id, data)
+                elif row['kind'] == 'group_policy':
+                    self.check_group(data["group_id"])
+                    current = await read_policy(connection, self_id, data["group_id"])
+                    applied = not any(getattr(current, key) != value for key, value in data["before"].items())
+                    if applied:
+                        # Apply displayed diff only; never expand a profile twice.
+                        updated = GroupPolicy.model_validate(current.model_dump() | data["after"])
+                        await save_policy(connection, updated)
+                else:
+                    raise ValueError("未知配置提案类型")
+                if not applied:
                     await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
-                    return "配置已发生变化，该提案已失效，请重新提交 /config。"
-                # Apply the displayed diff only. Never expand a profile a second time here.
-                updated = GroupPolicy.model_validate(current.model_dump() | data["after"])
-                await save_policy(connection, updated)
+                    return "配置已发生变化，该提案已失效，请重新提交 /config 或 /pref。"
             status = "confirmed" if confirm else "cancelled"
             await connection.execute("UPDATE configuration_proposals SET status=? WHERE id=?", (status, identifier))
             logger.info("Configuration proposal %s id=%s", status, identifier)
@@ -149,7 +157,8 @@ class PolicyRepository:
     async def failed(self, request: dict, error: str) -> None:
         async with self.db.transaction() as connection:
             await connection.execute("UPDATE configuration_requests SET status='failed',error=? WHERE id=?", (error, request["id"]))
-            await enqueue_text(connection, "配置解析失败：" + error + "。可使用 /config <群号> mode inbox 等明确命令。", request["self_id"])
+            hint = "请用 /pref 明确说明偏好后重试。" if request.get('kind') == 'triage_preferences' else "可使用 /config <群号> mode inbox 等明确命令。"
+            await enqueue_text(connection, "配置解析失败：" + error + "。" + hint, request["self_id"])
 
     async def retry(self, identifier: int) -> None:
         async with self.db.transaction() as connection:

@@ -9,6 +9,7 @@ from anyio import CancelScope
 
 from app.storage.migrations import migrate_history, migrate_phase2, migrate_self_id
 from app.storage.schema import SCHEMA
+from app.storage.triage_schema import migrate_triage
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class Database:
             await migrate_self_id(connection)
             await migrate_phase2(connection)
             await migrate_history(connection)
+            await migrate_triage(connection)
         logger.info("DB initialized")
 
     @asynccontextmanager

@@ -34,3 +34,13 @@ history:
   overlap_seconds: 300
   debounce_seconds: 60
   request_interval_seconds: 2
+triage:
+  enabled: true
+  inbox_debounce_seconds: 180
+  priority_debounce_seconds: 60
+  inbox_max_wait_seconds: 600
+  priority_max_wait_seconds: 180
+  max_messages_per_candidate: 100
+  max_input_chars: 40000
+  max_span_seconds: 3600
+  retry_count: 2

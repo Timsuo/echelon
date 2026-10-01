@@ -45,6 +45,8 @@ async def test_api_failures_and_retry(mode, caplog):
             assert calls == (2 if mode == "invalid" else 1)
             assert retries == (1 if mode == "invalid" else 0)
         if mode == "invalid":
-            assert "raw_response='INVALID JSON'" in caplog.text
+            assert "INVALID JSON" not in caplog.text
+            assert "raw_response" not in caplog.text
+            assert "schema=SummaryData response_length=12" in caplog.text
     finally:
         await client.close()

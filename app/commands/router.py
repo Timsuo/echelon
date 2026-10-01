@@ -7,6 +7,7 @@ from app.commands.help import COMMANDS, render_help
 from app.commands.history import HistoryCommands
 from app.commands.inbox import InboxCommands
 from app.commands.policies import PolicyCommands
+from app.commands.preferences import PreferenceCommands
 from app.commands.status import render_status
 from app.commands.summary import parse_window
 from app.config import AppConfig
@@ -31,12 +32,14 @@ class CommandRouter:
         inbox = InboxCommands(repository, config, storage)
         policies = PolicyCommands(repository, config.groups.allowed, admin_qq)
         history = HistoryCommands(repository, config, actions)
+        preferences = PreferenceCommands(repository, config.groups.allowed, admin_qq)
         handlers: dict[str, CommandHandler] = {
             "/help": self.help, "/coverage": history.coverage, "/sync": history.sync,
             "/status": self.status, "/summary": self.summary,
             "/inbox": inbox.listing, "/detail": inbox.detail, "/archive": inbox.archive, "/file": inbox.file,
             "/groups": policies.groups, "/group": policies.group, "/config": policies.config,
             "/confirm": policies.confirm, "/cancel": policies.cancel,
+            "/prefs": preferences.prefs, "/pref": preferences.pref,
         }
         self.handlers = {}
         for spec in COMMANDS:

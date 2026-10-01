@@ -33,9 +33,10 @@ class InboxCommands:
 
     async def listing(self, event: MessageEvent, argument: str) -> None:
         self_id = await self.account(event)
-        if argument not in {"", "unread"}:
-            raise ValueError("用法：/inbox 或 /inbox unread")
-        items = await self.inbox.list_items(self_id, argument == "unread", self.config.inbox.default_page_size)
+        if argument not in {"", "unread", "high", "critical", "deadline", "action"}:
+            raise ValueError("用法：/inbox [unread|high|critical|deadline|action]")
+        items = await self.inbox.list_items(self_id, argument == "unread", self.config.inbox.default_page_size,
+                                          "" if argument == "unread" else argument)
         await self.repository.notify(render_inbox(items, await self.inbox.unread_count(self_id),
                                                   self.config.timezone), self_id)
 

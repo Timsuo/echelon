@@ -26,12 +26,13 @@ COMMANDS = (
         "按 history.periodic_count 拉取最近有限条消息（最多500），可能补入消息、附件和 Inbox。\n"
         "不是下载整个群历史记录，只是 bounded best-effort consistency check。\n"
         "任务持久保存，完成后私聊结果；重复排队不会无限累积相同活动任务。", ("/sync", "/sync 756155087"), "状态与可靠性"),
-    CommandSpec("inbox", "/inbox [unread]", "收件箱列表",
+    CommandSpec("inbox", "/inbox [unread|high|critical|deadline|action]", "收件箱列表",
         "/inbox：最近的非归档条目，默认10条；/inbox unread：仅未读。列表不会标记已读。\n"
+        "high / critical：对应优先级；deadline：有截止文字或日期；action：需要行动。筛选不组合。\n"
         "/detail <id> 会将未读标为 read；/archive <id> 只归档，不删除源消息和附件。", ("/inbox", "/inbox unread"), "收件箱"),
     CommandSpec("detail", "/detail <id>", "查看条目及附件序号",
-        "id 是 /inbox 展示的条目编号。显示来源、内容、消息数量和附件。\n"
-        "副作用：unread → read；已归档条目保持 archived。", ("/detail 12",), "收件箱"),
+        "id 是 /inbox 展示的条目编号。显示来源、内容、消息数量、附件、分类、优先级、标签、行动、截止、置信度和覆盖提示。\n"
+        "副作用：unread → read；已归档条目保持 archived，不增加 revision。", ("/detail 12",), "收件箱"),
     CommandSpec("archive", "/archive <id>", "归档条目",
         "只将条目状态改为 archived，默认 /inbox 不再显示。\n源消息、附件和磁盘文件都不会删除。", ("/archive 12",), "收件箱"),
     CommandSpec("file", "/file <inbox_id> <attachment_index>", "获取附件",
@@ -45,8 +46,8 @@ COMMANDS = (
         "窗口存在未确认采集缺口时，Python 添加 Coverage Warning，不阻止生成。", ("/summary 30m", "/summary 2h", "/summary today"), "总结"),
     CommandSpec("groups", "/groups", "查看群策略列表",
         "SUMMARY_ONLY：保存消息、可总结、不进入 Inbox，通常不下载附件。\n"
-        "INBOX：保存消息、可总结，文件可进入 Inbox 并自动下载。\n"
-        "PRIORITY：类似 INBOX，Phase 2.5 更频繁回查历史；Phase 4 才有实时优先级提醒。\n"
+        "INBOX：保存消息、可总结，批量 LLM 聚合消息，文件可进入 Inbox 并自动下载。\n"
+        "PRIORITY：类似 INBOX，历史回查更频繁、分类等待更短；Phase 4 才有实时优先级提醒。\n"
         "IGNORE：停止业务采集及历史核验。\n"
         "如果只是不想收到提醒但仍希望以后总结，不要用 ignore，应使用 summary_only。\n"
         "上述是模式默认值，独立开关可以覆盖。此命令只读。", ("/groups",), "群策略"),
@@ -60,10 +61,21 @@ COMMANDS = (
         "取消：/cancel <id>。提案10分钟过期，重复确认幂等；配置已变化时需重新提交。\n"
         "切换 mode 会展开模式默认开关；单独关闭下载只修改下载字段。请仔细核对 diff。\n"
         "/config 不能将新群加入 allowlist，请手动修改 config.yaml 并重启。\n"
+        "个人重要性偏好请用 /pref；与群策略共用 /confirm 和 /cancel。\n"
         "当前不支持自动到期策略或每群 MB 阈值；遇到这些要求请使用现有明确开关，不会实现定时优先级提醒。",
         ("/config 756155087 mode inbox", "/config 高数群只需要总结", "/config 高数群不要自动下载文件",
          "/config 班级群重点关注", "/config 756155087 alias 高数群"), "群策略"),
-    CommandSpec("confirm", "/confirm <提案ID>", "应用配置提案",
+    CommandSpec("prefs", "/prefs", "查看个人分类偏好",
+        "展示本账号的重要/低优先级关键词、重要发送者和分类偏好。只读。\n"
+        "偏好参与后续 LLM 分类，不自动重算旧 Inbox，也不启用即时通知。", ("/prefs",), "个人偏好"),
+    CommandSpec("pref", "/pref <自然语言>", "生成个人偏好提案",
+        "后台解析允许的偏好增删，显示 Before → After，10分钟内 /confirm <id> 才生效；/cancel <id> 取消。\n"
+        "关键词每类最多30个、每个40字，发送者最多30个，分类使用固定枚举。\n"
+        "只改明确提出的偏好；不能修改群号、白名单、文件路径、通知计划或 quiet hours。\n"
+        "请求文本发送给 DeepSeek，解析失败不修改偏好。请检查提案差异。",
+        ("/pref 考试和调课对我很重要", "/pref 123456789 是老师，他的消息需要重点关注",
+         "/pref 讲座通常是低优先级", "/pref 课程资料正常优先级即可"), "个人偏好"),
+    CommandSpec("confirm", "/confirm <提案ID>", "应用群策略或个人偏好提案",
         "只接受本管理员、本机器人账号、未过期的 pending 提案。\n应用显示的差异；重复确认不会重复修改。", ("/confirm 42",), "群策略"),
     CommandSpec("cancel", "/cancel <提案ID>", "取消配置提案",
         "取消 pending 提案，不修改群配置。不用于撤销已经确认的变更；撤销请创建新提案。", ("/cancel 42",), "群策略"),
