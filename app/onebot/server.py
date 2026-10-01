@@ -1,8 +1,9 @@
 import json
 import logging
-import time
+import uuid
 
 import aiosqlite
+from anyio import CancelScope
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.onebot.adapter import authenticated, parse_self_id
@@ -37,6 +38,8 @@ async def onebot_socket(socket: WebSocket) -> None:
         logger.warning("OneBot connection rejected: invalid X-Self-ID")
         await socket.close(code=1008)
         return
+    session = uuid.uuid4().hex
+    attached = False
     try:
         if not await services.repository.bind_onebot(incoming_id):
             logger.warning("OneBot connection rejected: unexpected X-Self-ID")
@@ -49,7 +52,8 @@ async def onebot_socket(socket: WebSocket) -> None:
             await socket.close(code=1008)
             return
         actions.attach(socket)
-        await services.repository.state("last_ws_connected", str(time.time()))
+        attached = True
+        await services.history.connected(incoming_id, session)
         logger.info("WebSocket connected")
         while True:
             try:
@@ -86,4 +90,7 @@ async def onebot_socket(socket: WebSocket) -> None:
         logger.error("WebSocket failure: %s", type(error).__name__)
     finally:
         actions.detach(socket)
+        if attached:
+            with CancelScope(shield=True):
+                await services.history.disconnected(incoming_id, session)
         logger.info("WebSocket disconnected")

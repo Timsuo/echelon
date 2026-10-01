@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 from typing import Any
 
 from app.attachments.models import GroupFileReference
@@ -25,12 +26,14 @@ class Repository:
         return rows[0]["value"] if rows else None
 
     async def add_message(self, record: dict[str, Any], files: list[GroupFileReference] | None = None,
-                          policy: AttachmentConfig | None = None) -> bool:
+                          policy: AttachmentConfig | None = None,
+                          attachment_states: Callable[[dict[str, str]], None] | None = None) -> bool:
         from app.storage.policy_repository import read_policy
 
         columns = ("self_id", "group_id", "message_id", "user_id", "nickname", "event_time",
                    "received_time", "raw_message", "normalized_text", "reply_to_message_id",
-                   "message_json")
+                   "message_json", "ingest_source")
+        record = {"ingest_source": "realtime", **record}
         async with self.db.transaction() as connection:
             group_policy = await read_policy(connection, record["self_id"], record["group_id"])
             if group_policy.mode == "ignore":
@@ -41,12 +44,27 @@ class Repository:
                 tuple(record[column] for column in columns),
             ) as cursor:
                 inserted = cursor.rowcount == 1
-            await connection.execute(
-                "INSERT INTO runtime_state VALUES ('last_event_time',?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(record["received_time"]),))
-            if files and policy and policy.enabled:
+            timestamps = {"last_received_at": record["received_time"],
+                          "last_message_event_time": record["event_time"]}
+            if record["ingest_source"] == "realtime":
+                timestamps.update(last_event_time=record["received_time"],
+                                  last_realtime_received_at=record["received_time"])
+            for key, value in timestamps.items():
+                await connection.execute("INSERT INTO runtime_state VALUES (?,?) ON CONFLICT(key) DO UPDATE SET "
+                    "value=CAST(MAX(CAST(value AS REAL),CAST(excluded.value AS REAL)) AS TEXT)", (key, str(value)))
+                await connection.execute("INSERT INTO runtime_state VALUES (?,?) ON CONFLICT(key) DO UPDATE SET "
+                    "value=CAST(MAX(CAST(value AS REAL),CAST(excluded.value AS REAL)) AS TEXT)",
+                    (f"{key}:{record['self_id']}", str(value)))
+            # A history duplicate must not retroactively create Inbox items after a policy change.
+            if files and policy and policy.enabled and (inserted or record["ingest_source"] == "realtime"):
                 await ingest_files(connection, record, files, policy, group_policy)
+            if files and attachment_states:
+                keys = [file.source_key for file in files]
+                async with connection.execute("SELECT source_key,download_status FROM attachments WHERE self_id=? "
+                    f"AND group_id=? AND source_key IN ({','.join('?' for _ in keys)})",
+                    (record["self_id"], record["group_id"], *keys)) as cursor:
+                    # Synchronous cache update while the DB lock is held: worker cannot claim before registration.
+                    attachment_states({row["source_key"]: row["download_status"] for row in await cursor.fetchall()})
             return inserted
 
     async def bind_onebot(self, self_id: int) -> bool:

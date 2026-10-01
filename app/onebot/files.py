@@ -4,7 +4,9 @@ import hashlib
 import ipaddress
 import json
 import logging
+import re
 import socket
+from copy import deepcopy
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -18,6 +20,23 @@ if TYPE_CHECKING:
     from app.onebot.actions import ActionGateway
 
 logger = logging.getLogger(__name__)
+
+
+def without_file_urls(payload: dict) -> dict:
+    """Persist file provenance, not expiring download credentials embedded in file segments."""
+    result = deepcopy(payload)
+    for key in ("message", "raw_message"):
+        value = result.get(key)
+        if isinstance(value, list):
+            for segment in value:
+                if isinstance(segment, dict) and segment.get("type") == "file" and isinstance(segment.get("data"), dict):
+                    segment["data"].pop("url", None)
+        elif isinstance(value, str):
+            result[key] = re.sub(r"\[CQ:file(?:,[^\]]*)?\]",
+                lambda match: re.sub(r",url=[^,\]]*", "", match[0]), value)
+    if result.get("notice_type") == "group_upload" and isinstance(result.get("file"), dict):
+        result["file"].pop("url", None)
+    return result
 
 
 def upload_notice(payload: dict) -> MessageEvent | None:
@@ -90,6 +109,14 @@ class FileResolver:
     def __init__(self, actions: "ActionGateway") -> None:
         self.actions = actions
         self._urls: dict[tuple[int, int, str], str] = {}
+
+    def reconcile(self, references: list[GroupFileReference], states: dict[str, str]) -> None:
+        for reference in references:
+            status = states.get(reference.source_key)
+            if status == "pending":
+                self.remember([reference])
+            elif status != "downloading":
+                self.forget(reference.model_dump())
 
     def remember(self, references: list[GroupFileReference]) -> None:
         for reference in references:

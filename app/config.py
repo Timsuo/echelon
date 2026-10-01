@@ -62,6 +62,24 @@ class InboxConfig(StrictConfig):
     default_page_size: int = Field(default=10, ge=1, le=50)
 
 
+class HistoryConfig(StrictConfig):
+    enabled: bool = True
+    reconnect_count: int = Field(default=200, ge=1, le=500)
+    periodic_enabled: bool = True
+    inbox_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    priority_interval_seconds: int = Field(default=120, ge=60, le=86400)
+    summary_only_interval_seconds: int = Field(default=1800, ge=60, le=86400)
+    periodic_count: int = Field(default=100, ge=1, le=500)
+    retry_count: int = Field(default=2, ge=0, le=5)
+    overlap_seconds: int = Field(default=300, ge=0, le=3600)
+    debounce_seconds: int = Field(default=60, ge=30, le=300)
+    request_interval_seconds: int = Field(default=2, ge=1, le=60)
+
+    def interval(self, mode: str) -> int | None:
+        return {"priority": self.priority_interval_seconds, "inbox": self.inbox_interval_seconds,
+                "summary_only": self.summary_only_interval_seconds}.get(mode)
+
+
 class AppConfig(StrictConfig):
     groups: Groups = Field(default_factory=Groups)
     timezone: str = "Asia/Shanghai"
@@ -70,6 +88,7 @@ class AppConfig(StrictConfig):
     logging: LogConfig = Field(default_factory=LogConfig)
     attachments: AttachmentConfig = Field(default_factory=AttachmentConfig)
     inbox: InboxConfig = Field(default_factory=InboxConfig)
+    history: HistoryConfig = Field(default_factory=HistoryConfig)
 
     @field_validator("timezone")
     @classmethod

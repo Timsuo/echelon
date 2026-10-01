@@ -94,7 +94,7 @@ async def test_bad_event_detaches_before_close_yields(repository, self_id):
     socket = SimpleNamespace(
         headers={"authorization": "Bearer test-token", "x-self-id": "88"}, query_params={},
         app=SimpleNamespace(state=SimpleNamespace(services=SimpleNamespace(
-            secrets=credentials(), repository=repository, actions=actions, events=events))),
+            secrets=credentials(), repository=repository, actions=actions, events=events, history=AsyncMock()))),
         accept=AsyncMock(), receive_text=AsyncMock(return_value=json.dumps(event(self_id=self_id))),
         send_json=AsyncMock(),
     )

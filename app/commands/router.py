@@ -3,6 +3,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from app.attachments.storage import AttachmentStorage
+from app.commands.help import COMMANDS, render_help
+from app.commands.history import HistoryCommands
 from app.commands.inbox import InboxCommands
 from app.commands.policies import PolicyCommands
 from app.commands.status import render_status
@@ -28,12 +30,19 @@ class CommandRouter:
         self.started_at = started_at
         inbox = InboxCommands(repository, config, storage)
         policies = PolicyCommands(repository, config.groups.allowed, admin_qq)
-        self.handlers: dict[str, CommandHandler] = {
+        history = HistoryCommands(repository, config, actions)
+        handlers: dict[str, CommandHandler] = {
+            "/help": self.help, "/coverage": history.coverage, "/sync": history.sync,
             "/status": self.status, "/summary": self.summary,
             "/inbox": inbox.listing, "/detail": inbox.detail, "/archive": inbox.archive, "/file": inbox.file,
             "/groups": policies.groups, "/group": policies.group, "/config": policies.config,
             "/confirm": policies.confirm, "/cancel": policies.cancel,
         }
+        self.handlers = {}
+        for spec in COMMANDS:
+            handler = handlers['/' + spec.name]
+            for name in (spec.name, *spec.aliases):
+                self.handlers['/' + name] = handler
 
     async def dispatch(self, event: MessageEvent) -> None:
         if event.user_id != self.admin_qq:
@@ -48,15 +57,16 @@ class CommandRouter:
         handler = self.handlers.get(name)
         logger.info("Admin command recognized=%s", handler is not None)
         if handler is None:
-            await self.repository.notify("支持：/status、/summary 2h、/summary 30m、/summary today、"
-                                         "/inbox、/inbox unread、/detail <id>、/archive <id>、/file <id> <序号>、"
-                                         "/groups、/group <群号>、/config ...、/confirm <id>、/cancel <id>")
+            await self.repository.notify("未知命令。\n\n发送 /help 查看 Echelon 支持的命令。", event.self_id)
             return
         try:
             await handler(event, argument)
         except ValueError as error:
             # Only our own argument validation reaches here, never raw LLM/event payloads.
             await self.repository.notify(str(error))
+
+    async def help(self, event: MessageEvent, argument: str) -> None:
+        await self.repository.notify(render_help(argument), event.self_id)
 
     async def status(self, event: MessageEvent, argument: str) -> None:
         if argument:

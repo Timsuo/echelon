@@ -104,6 +104,10 @@ def test_duplicate_alias_requires_clarification():
 
 @pytest.mark.parametrize("text", ["999 mode priority", "这个群比较重要", "123 456 mode inbox"])
 def test_unknown_or_ambiguous_target_never_guessed(text):
+    if text == "123 456 mode inbox":
+        # Phase 2.5: only the explicit first token is a target; body numbers are ordinary data.
+        assert ConfigIntentParser.target(text, [GroupPolicy(self_id=88, group_id=123)]) == 123
+        return
     with pytest.raises(ValueError):
         ConfigIntentParser.target(text, [GroupPolicy(self_id=88, group_id=123)])
 

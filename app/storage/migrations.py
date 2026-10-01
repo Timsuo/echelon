@@ -4,6 +4,7 @@ import time
 
 import aiosqlite
 
+from app.storage.history_schema import STATEMENTS as HISTORY_STATEMENTS
 from app.storage.phase2_schema import STATEMENTS
 from app.storage.policy_schema import STATEMENTS as POLICY_STATEMENTS
 
@@ -59,3 +60,13 @@ async def migrate_phase2(connection: aiosqlite.Connection) -> None:
     }.items():
         if name not in columns:
             await connection.execute(f"ALTER TABLE private_outbox ADD COLUMN {name} {definition}")
+
+
+async def migrate_history(connection: aiosqlite.Connection) -> None:
+    async with connection.execute("PRAGMA table_info(messages)") as cursor:
+        columns = {row["name"] for row in await cursor.fetchall()}
+    if "ingest_source" not in columns:
+        await connection.execute("ALTER TABLE messages ADD COLUMN ingest_source TEXT NOT NULL DEFAULT 'realtime' "
+            "CHECK(ingest_source IN ('realtime','history_recovery','history_poll'))")
+    for statement in HISTORY_STATEMENTS:
+        await connection.execute(statement)

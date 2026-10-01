@@ -31,13 +31,13 @@ FIELD_CUES = {
 class ConfigIntentParser:
     @staticmethod
     def target(text: str, policies: list[GroupPolicy]) -> int:
-        numbers = set(re.findall(r"(?<!\d)\d{1,19}(?!\d)", text))
+        explicit = re.match(r"^\s*([0-9]{1,19})(?=\s|$)", text)
         allowed = {policy.group_id for policy in policies}
-        if numbers:
-            identifiers = {int(value) for value in numbers}
-            if identifiers - allowed:
+        if explicit:
+            identifier = int(explicit[1])
+            if identifier not in allowed:
                 raise ValueError("该群目前不在 Echelon 采集白名单中。请先在 config.yaml 中加入该群并重启。")
-            candidates = [policy for policy in policies if policy.group_id in identifiers]
+            return identifier
         else:
             candidates = [policy for policy in policies if policy.alias and policy.alias in text]
         if len(candidates) == 1:

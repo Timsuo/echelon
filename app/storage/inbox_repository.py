@@ -27,6 +27,8 @@ async def ingest_files(connection, record: dict, files: list[GroupFileReference]
             status, error = "skipped", "auto_download_disabled"
         elif file.file_size is not None and file.file_size > policy.max_auto_download_mb * 1024**2:
             status, error = "skipped", "size_limit"
+        elif not file.file_id and not file.url:
+            status, error = "failed", "file_reference_unavailable"
         now = time.time()
         async with connection.execute(
             "INSERT INTO attachments(self_id,group_id,message_id,file_id,filename,file_size,busid,"

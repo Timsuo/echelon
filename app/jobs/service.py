@@ -6,6 +6,7 @@ from app.llm.deepseek import DeepSeekClient, SummaryError
 from app.llm.prompts import transcript
 from app.llm.schemas import SummaryData
 from app.notifier.renderer import render_summary
+from app.storage.history_repository import HistoryRepository
 from app.storage.policy_repository import PolicyRepository
 from app.storage.repository import Repository
 
@@ -50,7 +51,9 @@ class SummaryService:
                 await self.repository.state("last_successful_api_call", str(time.time()))
             else:
                 result = SummaryData.empty()
-            rendered = render_summary(result, job, len(messages), self.config.timezone)
+            gaps = await HistoryRepository(self.repository, self.config).unresolved(
+                job["self_id"], job["group_id"], job["window_start"], job["window_end"])
+            rendered = render_summary(result, job, len(messages), self.config.timezone, gaps)
             await self.repository.complete_job(job, self.config.deepseek.model, len(messages),
                                                result.model_dump_json(), rendered)
             logger.info("Summary job completed id=%s", job["id"])

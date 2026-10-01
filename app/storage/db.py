@@ -5,8 +5,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
+from anyio import CancelScope
 
-from app.storage.migrations import migrate_phase2, migrate_self_id
+from app.storage.migrations import migrate_history, migrate_phase2, migrate_self_id
 from app.storage.schema import SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class Database:
         async with self.transaction() as connection:
             await migrate_self_id(connection)
             await migrate_phase2(connection)
+            await migrate_history(connection)
         logger.info("DB initialized")
 
     @asynccontextmanager
@@ -38,13 +40,15 @@ class Database:
         if self.connection is None:
             raise RuntimeError("Database not open")
         async with self.lock:
-            await self.connection.execute("BEGIN IMMEDIATE")
             try:
+                # BEGIN itself can finish in SQLite's thread after its waiter is cancelled.
+                await self.connection.execute("BEGIN IMMEDIATE")
                 yield self.connection
                 await self.connection.commit()
             except BaseException:
-                # Cancellation must also release SQLite's transaction lock.
-                await self.connection.rollback()
+                # Starlette uses level cancellation; shield cleanup before releasing our lock.
+                with CancelScope(shield=True):
+                    await self.connection.rollback()
                 logger.warning("DB transaction rolled back")
                 raise
 

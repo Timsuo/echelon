@@ -8,11 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.attachments.storage import AttachmentStorage, safe_filename
 from app.onebot.adapter import parse_self_id, response_echo
+from app.onebot.history import GroupHistoryQuery
 from app.storage.inbox_repository import InboxRepository
 from app.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
-READ_ONLY_ACTIONS = frozenset({"get_group_file_url"})
+READ_ONLY_ACTIONS = frozenset({"get_group_file_url", "get_group_msg_history"})
 PRIVATE_OUTPUT_ACTIONS = frozenset({"send_private_msg", "upload_private_file"})
 ALLOWED_ACTIONS = READ_ONLY_ACTIONS | PRIVATE_OUTPUT_ACTIONS
 
@@ -106,6 +107,12 @@ class ActionGateway:
             request = PrivateMessage.model_validate(params)
             wire_params = {"user_id": request.user_id,
                            "message": [{"type": "text", "data": {"text": request.text}}], "auto_escape": True}
+        elif action == "get_group_msg_history":
+            history = GroupHistoryQuery.model_validate(params)
+            await self._check_account(history.self_id)
+            if history.group_id not in self.allowed_groups:
+                raise PermissionError("Group is not allowed")
+            wire_params = history.wire()
         elif action == "get_group_file_url":
             query = GroupFileQuery.model_validate(params)
             await self._check_account(query.self_id)

@@ -47,7 +47,7 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 - self_id 隔离、握手身份校验、Action Firewall、提示词注入防护。
 - 持久私聊 outbox、任务恢复、Windows 进程锁与长期运行。
 
-### Phase 2 — Implemented / Current
+### Phase 2 — Implemented
 
 - file 消息段与 group_upload 通知的附件元数据、幂等记录和异步下载。
 - 大小限制、安全文件名、临时文件、SHA-256、原子改名、有限重试和重启恢复。
@@ -56,6 +56,14 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 - 文件仅转发给 ADMIN_QQ，不解析附件内容，不调用 LLM 分类。
 - Group Policy：`summary_only`、`inbox`、`priority`、`ignore`，默认只总结。
 - `/groups`、`/group`、`/config` → 配置提案 → `/confirm` 或 `/cancel`；自然语言后台解析。
+
+### Phase 2.5 — Reliability / History Recovery / Command UX — Current
+
+- `/config` 只将首个独立数字 token 作为显式群号，正文的日期、天数和 MB 数字不影响唯一别名匹配。
+- 断连/停机缺口持久化、重连有限回补、在线低频重叠核验、手动 `/sync`。
+- `ingest_source` 区分实时与历史；`/coverage` 展示保守覆盖状态，总结对未确认缺口添加 Python 生成的警告。
+- `/help` 分类首页及全部命令详情来自统一 CommandSpec，与路由共用注册信息。
+- 所有恢复均为 best effort，没有完整离线重放保证，也未实现 Phase 3 智能分类或 Phase 4 紧急提醒。
 
 ## Architecture
 
@@ -157,7 +165,7 @@ API 地址固定为 `https://api.deepseek.com`，不使用 OpenAI API Key。
 6. 必须使用事件和 API 响应共用的 **Universal 双向连接**；不要分开建立 Event 与 API 连接。
 7. 保持 NapCat 在线。仅运行 Python 不会自动启动 NapCat，也不会登录 QQ。
 
-Phase 2 需 NapCat 支持 `get_group_file_url` 和 `upload_private_file`，并与 Python 运行在同一电脑、
+Phase 2 需 NapCat 支持 `get_group_file_url` 和 `upload_private_file`，Phase 2.5 另需 `get_group_msg_history`；并与 Python 运行在同一电脑、
 能访问同一个附件绝对路径。`group_upload` 通知中的 id/name/size/busid，以及 file 消息段字段，
 均在 `app/onebot/files.py` 适配。参见 [NapCat 文件 API](https://napneko.github.io/onebot/api)
 和 [群文件事件](https://napneko.github.io/onebot/event)。
@@ -226,7 +234,7 @@ SQLite 位于 `data/messages.db`，自动初始化 WAL、NORMAL、foreign_keys �
 
 ## 安全边界与故障行为
 
-- `ActionGateway` 是唯一 WebSocket 写入 OneBot action 的位置。READ_ONLY_ACTIONS 仅含 `get_group_file_url`，
+- `ActionGateway` 是唯一 WebSocket 写入 OneBot action 的位置。READ_ONLY_ACTIONS 仅含 `get_group_file_url` / `get_group_msg_history`，
   PRIVATE_OUTPUT_ACTIONS 仅含 `send_private_msg` / `upload_private_file`；任何其他 action 首先抛出 `PermissionError`。
   不开放当前不需要的目录查询、`download_file` 或任何群文件修改 API。
 - 私聊目的地必须等于 ADMIN_QQ。文字固定为 text segment，不解释 CQ 内容；文件调用只接受附件数据库 ID 与账号，
@@ -369,6 +377,7 @@ summary_only 可只保存附件元数据并标记 skipped；ignore 在业务入�
 已开始的 API 请求或文件传输可能完成；下载 worker 在执行前重新检查策略。
 
 **Priority Watch policy is stored, but automatic urgent alerts are planned for Phase 4.**
+Phase 2.5 的 priority 模式仅额外提高历史核验频率（默认2分钟），不进行 LLM 优先级判断或即时提醒。
 Phase 2 没有 LLM triage，也没有自动紧急通知。
 
 `/groups` 列出当前账号白名单群与策略；`/group <群号>` 查看单群。
@@ -393,6 +402,8 @@ Phase 2 没有 LLM triage，也没有自动紧急通知。
 明确格式 `mode <profile>`、`alias <别名>`、`<开关字段> true/false` 直接本地解析；简单中文文件开关也可本地识别。
 其他自然语言后台调用 DeepSeek，沿用默认关闭 thinking、严格 JSON 校验和有限重试。缺少 API Key 不影响明确命令。
 Python 先从本账号白名单/别名唯一解析目标，LLM 输出中不允许 group_id、SQL、路径或 action 权限，不能凭空决定群号。
+只有 `/config` 后第一个完整数字 token 被解释为显式群号，其优先于别名；正文 `14天`、`10月15日`、`100MB` 均按普通文本处理。
+同名别名会列出候选并要求群号。当前不支持自动到期策略或每群下载大小阈值；数字解析正确不表示新增了这些配置能力。
 
 ```text
 /config ...
@@ -415,7 +426,8 @@ Echelon 在本地保存 QQ group messages、metadata、attachments、summaries �
 Phase 1 summary 会将对应窗口的群聊文本发送给配置的 DeepSeek API provider。
 自然语言 `/config` 会将该配置文本发送给同一 provider，本地还保存配置解析请求、提案与群策略；明确格式命令不调用 API。
 **Phase 2 附件 binary 内容不会发送给 DeepSeek**：不读取文档内容、不 OCR、不解压、不进行图片或语音理解。
-原始事件 JSON 可能保留事件自带 URL；下载与文件转发不把它当永久可用地址。日志不记录完整 URL 或文件内容。
+新事件持久化时移除已识别 file segment / CQ file / group_upload 的临时 URL；仅 pending 附件在内存中短期缓存直链。
+升级前原始事件 JSON 可能已有 URL，本次不批量改写历史数据；恢复与转发不依赖这些旧地址。日志不记录完整 URL 或文件内容。
 
 ## Phase 2 Manual Verification
 
@@ -438,12 +450,138 @@ Phase 1 summary 会将对应窗口的群聊文本发送给配置的 DeepSeek API
 新增模块：`app/attachments/`（标准引用、安全存储、下载 worker）、`app/inbox/renderer.py`、
 `app/commands/inbox.py`、`app/onebot/files.py`、`app/storage/inbox_repository.py`、`app/storage/phase2_schema.py`。
 
+## Command Reference
+
+命令仅限 ADMIN_QQ 私聊；普通文字不触发命令。未知命令只提示 `/help`。
+`/help` 显示分类首页，`/help <命令>` 展示用法、参数、副作用、限制及例子。
+
+| Command | Purpose |
+| --- | --- |
+| `/help [命令]` | 分类帮助或单命令详情 |
+| `/status` | 连接、消息、附件、Inbox、DeepSeek、任务与运行时间 |
+| `/coverage` | 采集缺口、恢复覆盖及周期核验状态 |
+| `/sync [群号]` | 对全部非 ignore 白名单群或指定群建立有限历史核验任务 |
+| `/summary <时间窗口>` | 总结开启 Summary 的群；支持 30m、2h、today |
+| `/inbox [unread]` | 非归档条目或仅未读条目 |
+| `/detail <id>` | 查看 Inbox 内容及附件序号，unread → read |
+| `/archive <id>` | 归档，保留源消息与附件 |
+| `/file <inbox_id> <attachment_index>` | 将已下载且安全的附件发给 ADMIN_QQ |
+| `/groups` | 当前账号白名单群的策略列表 |
+| `/group <群号>` | 查看单群策略 |
+| `/config <群号或别名> <配置意图>` | 生成 Before → After 配置提案 |
+| `/confirm <提案ID>` | 确认未过期且未发生冲突的提案 |
+| `/cancel <提案ID>` | 取消待确认提案，不修改策略 |
+
+复杂命令详见上文 Commands、Group Policies 和 Conversational Configuration。
+`/help config` 包含完整配置确认流程；`/help groups` 解释模式。只想避免提醒但仍保留以后总结能力时使用 summary_only，不要使用 ignore。
+
+### /coverage 与 /sync
+
+`/coverage` 只读展示当前连接、最后实时消息接收、最近五个断连窗口、回补数量、未确认缺口总数及每群最近周期核验。
+没有已记录 gap 也不代表没有漏报；`/status` 的在线状态不能替代数据覆盖检查。
+
+`/sync` 或 `/sync 756155087` 创建持久 manual 任务，立即回复任务编号；完成后私聊简要结果。
+必须在白名单且当前非 ignore。相同群已有活动 manual 任务时不重复排队。
+手动核验使用 history.periodic_count（最多500），窗口为该群核验间隔加 overlap；不是全量群历史下载。
+回补可能增加消息、附件和 Inbox，但不会重放历史私聊命令。
+
+## Reliability and History Recovery
+
+主要数据源仍是 **OneBot realtime event**；`get_group_msg_history` 仅用于 **best-effort repair**。
+**NapCat / QQ history API cannot be treated as a guaranteed complete offline event replay mechanism.**
+不能保证 QQ 离线期间所有消息都能返回；接口成功也不是完整覆盖证明。
+
+实现参考 [NapCat 群历史 Action 源码](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/go-cqhttp/GetGroupMsgHistory.ts)。
+兼容逻辑集中在 `app/onebot/history.py`：从最新位置拉取有限 N 条，不依赖 message_seq 翻页语义；
+采用兼容参数 reverseOrder，不向 worker 暴露版本差异。若所用版本不支持，会有限失败并显示 failed，不无限探测接口。
+
+```yaml
+history:
+  enabled: true
+  reconnect_count: 200
+  periodic_enabled: true
+  inbox_interval_seconds: 300
+  priority_interval_seconds: 120
+  summary_only_interval_seconds: 1800
+  periodic_count: 100
+  retry_count: 2
+  overlap_seconds: 300
+  debounce_seconds: 60
+  request_interval_seconds: 2
+```
+
+- count 范围1–500；间隔60–86400秒；额外重试0–5次；overlap 0–3600秒；debounce 30–300秒；请求间隔1–60秒。
+- 周期调度每30秒检查一次到期群，priority 默认2分钟、inbox 5分钟、summary_only 30分钟，ignore 永不调度。
+  首次连接先等待一个周期；故意回查有重叠的最近历史，再依靠消息唯一键去重，不依赖精确的单条游标。
+- 重连关闭 gap 并创建每群 reconnect 任务，稳定连接 debounce 时间后开始回查。WebSocket handler 不等待历史 API。
+- reconnect 只入库 gap_start−overlap 到 reconnect_time+overlap 的消息；periodic/manual 使用各自持久窗口加 overlap。
+  即使窗口很长，每次仍只请求有限最新 N 条，不分页爬取全部历史。
+- 历史消息先经过身份、群、消息ID、时间、发送者、消息段校验，再进入同一 EventProcessor / Repository.add_message。
+  非法单条跳过并警告；外层结构或身份错误失败。私聊历史不会执行 CommandRouter。
+- 消息唯一键保持 `(self_id,group_id,message_id)`；已有记录不会被历史覆盖或重复创建 Inbox。
+  新历史文件遵守当前群策略、白名单和大小限制；缺少可用引用时附件失败，消息仍保存。
+- transient OneBot 断连、超时及 provider 拒绝最多额外重试 retry_count 次；重试预算持久保存，重启不重置。
+  非白名单、ignore、身份不一致、无效 response schema 直接失败。周期任务不发“同步完成”通知。
+
+### Collection gaps 与停机
+
+连接断开记录 open gap，重连时结束窗口并异步恢复。正常停机保存 service_clean_shutdown / last_service_stop，
+下次启动保留 service_stop / offline_window_clean；崩溃或断电从最后已知实时接收/连接检查点保守推断 offline_window_unclean。
+无法精确重建断电时刻，推断窗口可能偏大；首次全新启动没有过去在线证据时不虚构旧缺口。
+gap 在实际重连前保持 open，包含 Python 已启动但 NapCat 尚未连接的时间。
+
+重连报告通过当前账号 private_outbox 投递。短时连续 gap 等连接稳定后合并一份报告；报告与“已报告”标记同事务保存。
+NapCat 断线期间只记录本地状态，不尝试通过离线 QQ 即时提醒。关闭 history 时 gap 仍保留并报告 unknown。
+
+### Coverage 含义与总结警告
+
+| 状态 | 含义 |
+| --- | --- |
+| likely_covered | 有效返回的最早时间不晚于窗口开始，最晚时间不早于窗口结束，且无无效记录；仍不保证每条完整 |
+| partial | 有有效记录但未跨过窗口两端，或部分记录无效 |
+| unknown | 空结果、无有效时间，或没有可核验的群任务 |
+| failed | 有限重试耗尽或安全/结构验证失败 |
+| pending / running | 等待重连或任务尚未完成，不视为已覆盖 |
+
+窗口时间范围只是覆盖证据，不证明其中无漏报；安静群没有窗口末端消息时也可能保守显示 partial。
+恢复报告列出窗口、原因、涉及群、获取/新增数量和覆盖状态。返回消息数包含接口返回的重复/无效项；新增数仅算本次成功插入。
+进程恰在单条入库后、任务统计落盘前崩溃时，恢复后的新增计数可能低估，消息仍通过唯一键保留。
+
+`/summary` 与当前账号/目标群的未确认 gap 相交时，Python renderer 增加“数据覆盖警告”，不阻止摘要，也不依赖 LLM 写警告。
+其他群的良好恢复结果不能替该群证明完整；`HistoryRepository.unresolved` 同样可供未来 Inbox / triage 按源消息时间查询。
+
+### 来源时间与迁移
+
+messages.ingest_source：realtime、history_recovery（重连/手动）、history_poll（周期）。
+旧 Phase 1/2 行默认 realtime；真正 event_time 保留，received_time 为本地入库时刻。
+未来 urgent alert 必须按 **event_time** 判断新旧，不能把历史消息的 received_time 当新事件。
+runtime_state 区分 last_received_at、last_message_event_time（最大消息时间）、last_realtime_received_at；
+保留旧 last_event_time 作为实时接收兼容字段，历史回补不会更新它；同时保留按账号的时间键供 coverage 使用。
+
+启动在同一迁移事务中幂等增加 ingest_source、collection_gaps、history_sync_jobs、history_sync_state。
+现有消息、附件、Inbox、策略、总结保留；失败回滚。running 历史任务恢复 queued，所有新查询和任务绑定 self_id。
+历史来源通过已验证连接上下文补齐缺失 self_id；响应明确返回其他 self_id 或 group_id 时拒绝，不混入数据。
+
+## Phase 2.5 Manual Verification
+
+1. 备份 data 后启动 Echelon 和 NapCat，保持现有 Reverse WebSocket 与令牌配置。
+2. `/help`、`/help config`、`/coverage`，记录当前状态。
+3. 暂停 NapCat WebSocket 或关闭 NapCat，在白名单非 ignore 群发送测试消息，等待约2分钟。
+4. 恢复 NapCat；观察 collection_gaps 结束、history_sync_jobs 创建，等待默认60秒稳定期后回查。
+5. 检查 messages 是否补入可获取消息、event_time 和 ingest_source 是否正确，重复消息是否仍只有一条。
+6. 收到采集恢复报告后 `/coverage`，确认只显示 likely_covered / partial / unknown / failed 等保守状态。
+7. `/summary 30m`；窗口仍有 partial/unknown/failed/pending/running gap 时，应显示数据覆盖警告。
+8. `/sync <群号>` 验证立即入队与后台完成通知；等待一个策略周期，验证周期回查静默执行。
+9. 正常停止并重启 Python，验证 service_stop 窗口与恢复；在测试环境模拟异常退出，验证 running → queued 和推断离线窗口。
+10. 验证别名加14天/日期/100MB可确定正确群，但不会新增自动到期或每群大小配置能力；核对提案后再确认。
+
 ## Roadmap
 
 | 阶段 | 状态 | 范围 |
 | --- | --- | --- |
 | Phase 1 — Message Collection & Summary | ✅ Implemented | 消息采集、持久化、私聊总结 |
-| Phase 2 — Attachments & Inbox Foundation | ✅ Current | 附件、Inbox、管理员文件转发、Group Policy、Conversational Configuration |
+| Phase 2 — Attachments & Inbox Foundation | ✅ Implemented | 附件、Inbox、管理员文件转发、Group Policy、Conversational Configuration |
+| Phase 2.5 — Reliability / History Recovery / Command UX | Current | 缺口检测、有限历史回补、周期核验、覆盖警告、统一帮助 |
 | Phase 3 — Intelligent Triage | Planned | categories、priorities、labels、deadline extraction、personal preferences |
 | Phase 4 — Delivery Automation | Planned | heartbeat、urgent alert、scheduled digest、quiet hours |
 | Phase 5 — Web Inbox | Planned | browser UI、search、filtering、archive、attachment management |

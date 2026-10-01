@@ -1,15 +1,18 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.history.renderer import coverage_warning
 from app.llm.schemas import SummaryData
 
 
-def render_summary(data: SummaryData, job: dict, count: int, timezone: str) -> str:
+def render_summary(data: SummaryData, job: dict, count: int, timezone: str, gaps: list[dict] | None = None) -> str:
     zone = ZoneInfo(timezone)
     start = datetime.fromtimestamp(job["window_start"], zone).strftime("%Y-%m-%d %H:%M")
     end = datetime.fromtimestamp(job["window_end"], zone).strftime("%Y-%m-%d %H:%M")
     lines = [f"【群聊总结 #{job['id']}】", f"群：{job['group_id']}",
              f"时间：{start} 至 {end}", f"消息：{count} 条", ""]
+    if gaps:
+        lines.extend([coverage_warning(gaps, timezone), ""])
     if count == 0:
         lines.append("此时间窗口没有已采集的消息。")
     for topic in data.topics:

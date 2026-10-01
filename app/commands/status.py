@@ -13,7 +13,7 @@ async def render_status(repository: Repository, actions: ActionGateway,
     rows = await repository.query("SELECT count(*) AS n FROM messages")
     counts = {row["status"]: row["n"] for row in await repository.query(
         "SELECT status,count(*) AS n FROM summary_jobs GROUP BY status")}
-    last = await repository.state("last_event_time")
+    last = await repository.state("last_received_at") or await repository.state("last_event_time")
     last_text = (datetime.fromtimestamp(float(last), ZoneInfo(config.timezone)).strftime(
         "%Y-%m-%d %H:%M:%S") if last else "尚未收到白名单群消息")
     health = await repository.state("deepseek_health") or "Unknown"

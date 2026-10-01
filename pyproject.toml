@@ -12,6 +12,7 @@ dependencies = [
   "aiosqlite>=0.21,<1", "pydantic-settings>=2.7,<3", "PyYAML>=6,<7",
   "openai>=1.60,<3", "tenacity>=9,<10", "filelock>=3.17,<4", "tzdata>=2025.1",
   "httpx>=0.28,<1",
+  "anyio>=4,<5",
 ]
 
 [project.optional-dependencies]

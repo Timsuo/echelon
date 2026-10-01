@@ -22,3 +22,15 @@ attachments:
   retry_count: 2
 inbox:
   default_page_size: 10
+history:
+  enabled: true
+  reconnect_count: 200
+  periodic_enabled: true
+  inbox_interval_seconds: 300
+  priority_interval_seconds: 120
+  summary_only_interval_seconds: 1800
+  periodic_count: 100
+  retry_count: 2
+  overlap_seconds: 300
+  debounce_seconds: 60
+  request_interval_seconds: 2
