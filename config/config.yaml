@@ -1,5 +1,5 @@
 groups:
-  allowed: [756155087]  # 填写数字群号，例如 [123456789]
+  allowed: [756155087,677042790]  # 填写数字群号，例如 [123456789]
 timezone: Asia/Shanghai
 websocket:
   host: 127.0.0.1
@@ -14,3 +14,11 @@ deepseek:
   max_input_chars: 60000
 logging:
   level: INFO
+attachments:
+  enabled: true
+  storage_dir: data/attachments
+  auto_download: true
+  max_auto_download_mb: 100
+  retry_count: 2
+inbox:
+  default_page_size: 10

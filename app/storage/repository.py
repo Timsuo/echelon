@@ -1,7 +1,10 @@
 import time
 from typing import Any
 
+from app.attachments.models import GroupFileReference
+from app.config import AttachmentConfig
 from app.storage.db import Database
+from app.storage.inbox_repository import ingest_files
 
 
 class Repository:
@@ -21,11 +24,17 @@ class Repository:
         rows = await self.query("SELECT value FROM runtime_state WHERE key=?", (key,))
         return rows[0]["value"] if rows else None
 
-    async def add_message(self, record: dict[str, Any]) -> bool:
+    async def add_message(self, record: dict[str, Any], files: list[GroupFileReference] | None = None,
+                          policy: AttachmentConfig | None = None) -> bool:
+        from app.storage.policy_repository import read_policy
+
         columns = ("self_id", "group_id", "message_id", "user_id", "nickname", "event_time",
                    "received_time", "raw_message", "normalized_text", "reply_to_message_id",
                    "message_json")
         async with self.db.transaction() as connection:
+            group_policy = await read_policy(connection, record["self_id"], record["group_id"])
+            if group_policy.mode == "ignore":
+                return False
             async with connection.execute(
                 f"INSERT INTO messages ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
                 "ON CONFLICT(self_id,group_id,message_id) DO NOTHING",
@@ -36,6 +45,8 @@ class Repository:
                 "INSERT INTO runtime_state VALUES ('last_event_time',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(record["received_time"]),))
+            if files and policy and policy.enabled:
+                await ingest_files(connection, record, files, policy, group_policy)
             return inserted
 
     async def bind_onebot(self, self_id: int) -> bool:
@@ -51,17 +62,30 @@ class Repository:
                 return row["value"] == str(self_id)
 
     @staticmethod
-    async def enqueue_text(connection: Any, text: str) -> None:
+    async def enqueue_text(connection: Any, text: str, self_id: int | None = None) -> None:
         # Plain text segments are used at delivery; split without interpreting CQ codes.
         parts = [text[i:i + 1800] for i in range(0, len(text), 1800)]
         for index, part in enumerate(parts, 1):
             prefix = f"({index}/{len(parts)})\n" if len(parts) > 1 else ""
             await connection.execute(
-                "INSERT INTO private_outbox(text,created_at) VALUES (?,?)", (prefix + part, time.time()))
+                "INSERT INTO private_outbox(text,created_at,self_id) VALUES (?,?,?)", (prefix + part, time.time(), self_id))
 
-    async def notify(self, text: str) -> None:
+    async def notify(self, text: str, self_id: int | None = None) -> None:
         async with self.db.transaction() as connection:
-            await self.enqueue_text(connection, text)
+            await self.enqueue_text(connection, text, self_id)
+
+    async def enqueue_file(self, self_id: int, attachment_id: int) -> None:
+        rows = await self.query("INSERT INTO private_outbox(text,created_at,kind,self_id,attachment_id) "
+            "SELECT '',?,'file',self_id,id FROM attachments WHERE self_id=? AND id=? "
+            "AND download_status='downloaded' RETURNING id", (time.time(), self_id, attachment_id))
+        if not rows:
+            raise ValueError("附件尚未准备完成或不属于当前账号。")
+
+    async def cancel_notification(self, item: dict, error: str) -> None:
+        async with self.db.transaction() as connection:
+            await connection.execute("UPDATE private_outbox SET cancelled_at=?,error=? WHERE id=?",
+                                      (time.time(), error, item["id"]))
+            await self.enqueue_text(connection, "附件发送失败：" + error, item["self_id"])
 
     async def queue_summaries(self, self_id: int, message_id: str, groups: list[int],
                               start: float, end: float) -> list[int]:
@@ -138,7 +162,9 @@ class Repository:
 
     async def next_notification(self) -> dict | None:
         # One sender per process, guaranteed by process lock. Keep chunk ordering.
-        rows = await self.query("SELECT * FROM private_outbox WHERE sent_at IS NULL ORDER BY id LIMIT 1")
+        rows = await self.query("SELECT * FROM private_outbox WHERE sent_at IS NULL AND cancelled_at IS NULL "
+            "AND (self_id IS NULL OR self_id=CAST((SELECT value FROM runtime_state WHERE key='onebot_self_id') AS INTEGER)) "
+            "ORDER BY id LIMIT 1")
         return rows[0] if rows and rows[0]["next_attempt"] <= time.time() else None
 
     async def notification_result(self, item: dict, error: str | None = None) -> None:

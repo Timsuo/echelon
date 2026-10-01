@@ -2,12 +2,14 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import DeepSeekConfig
 from app.llm.prompts import SYSTEM_PROMPT
 from app.llm.schemas import SummaryData
+from app.policies.models import ConfigIntent
+from app.policies.parser import SYSTEM_PROMPT as CONFIG_PROMPT
 
 logger = logging.getLogger(__name__)
 RETRYABLE_FINISH_REASONS = frozenset({"insufficient_system_resource", "aborted"})
@@ -38,6 +40,13 @@ class DeepSeekClient:
                                   timeout=config.timeout, max_retries=0) if api_key else None
 
     async def summarize(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> SummaryData:
+        return await self._generate(text, SYSTEM_PROMPT, SummaryData, on_retry)
+
+    async def parse_config(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> ConfigIntent:
+        return await self._generate(text, CONFIG_PROMPT, ConfigIntent, on_retry)
+
+    async def _generate[T: BaseModel](self, text: str, system: str, schema: type[T],
+                                       on_retry: Callable[[], Awaitable[None]]) -> T:
         if self.client is None:
             raise SummaryError("未配置 DEEPSEEK_API_KEY")
         try:
@@ -54,7 +63,7 @@ class DeepSeekClient:
                     logger.info("DeepSeek request attempt=%s", attempt.retry_state.attempt_number)
                     response = await self.client.chat.completions.create(
                         model=self.config.model,
-                        messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                        messages=[{"role": "system", "content": system},
                                   {"role": "user", "content": text}],
                         response_format={"type": "json_object"}, max_tokens=8000,
                         extra_body={"thinking": {"type": "enabled" if self.config.thinking else "disabled"}},
@@ -76,10 +85,13 @@ class DeepSeekClient:
                         logger.warning("DeepSeek returned empty content")
                         raise RetryableModelOutputError("模型返回空内容")
                     try:
-                        result = SummaryData.model_validate_json(raw)
+                        result = schema.model_validate_json(raw)
                     except ValidationError as error:
                         # %r keeps newlines escaped; shared formatter redacts configured secrets.
-                        logger.error("DeepSeek invalid JSON/schema raw_response=%r", raw)
+                        if schema is SummaryData:
+                            logger.error("DeepSeek invalid JSON/schema raw_response=%r", raw)
+                        else:
+                            logger.error("DeepSeek invalid configuration schema response_length=%s", len(raw))
                         raise RetryableModelOutputError("模型返回 JSON 不合法或不符合 Schema") from error
                     logger.info("DeepSeek API request succeeded")
                     return result

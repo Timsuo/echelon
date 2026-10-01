@@ -4,6 +4,9 @@ import time
 
 import aiosqlite
 
+from app.storage.phase2_schema import STATEMENTS
+from app.storage.policy_schema import STATEMENTS as POLICY_STATEMENTS
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,3 +46,16 @@ async def migrate_self_id(connection: aiosqlite.Connection) -> None:
             BEFORE INSERT ON {table} WHEN NEW.self_id IS NULL
             BEGIN SELECT RAISE(ABORT, 'self_id is required'); END
         """)
+
+
+async def migrate_phase2(connection: aiosqlite.Connection) -> None:
+    for statement in (*STATEMENTS, *POLICY_STATEMENTS):
+        await connection.execute(statement)
+    async with connection.execute("PRAGMA table_info(private_outbox)") as cursor:
+        columns = {row["name"] for row in await cursor.fetchall()}
+    for name, definition in {
+        "kind": "TEXT NOT NULL DEFAULT 'text'", "self_id": "INTEGER",
+        "attachment_id": "INTEGER REFERENCES attachments(id)", "cancelled_at": "REAL",
+    }.items():
+        if name not in columns:
+            await connection.execute(f"ALTER TABLE private_outbox ADD COLUMN {name} {definition}")

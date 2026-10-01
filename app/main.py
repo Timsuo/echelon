@@ -1,6 +1,7 @@
 import sys
 
 import uvicorn
+from pydantic import ValidationError
 
 from app.application import create_app
 from app.config import Secrets, load_config
@@ -14,6 +15,9 @@ def main() -> None:
         # ValidationError may include user inputs. Report fields/types only.
         print(f"Configuration invalid ({type(error).__name__}). Check .env and config/config.yaml.",
               file=sys.stderr)
+        if isinstance(error, ValidationError):
+            for item in error.errors(include_input=False, include_context=False, include_url=False):
+                print(f"  {'.'.join(map(str, item['loc']))}: {item['type']}", file=sys.stderr)
         raise SystemExit(2) from None
     uvicorn.run(create_app(config, secrets), host=config.websocket.host,
                 port=config.websocket.port, workers=1, access_log=False,

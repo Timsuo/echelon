@@ -6,6 +6,7 @@ from app.llm.deepseek import DeepSeekClient, SummaryError
 from app.llm.prompts import transcript
 from app.llm.schemas import SummaryData
 from app.notifier.renderer import render_summary
+from app.storage.policy_repository import PolicyRepository
 from app.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ class SummaryService:
                 raise SummaryError("总结任务缺少有效 self_id")
             if job["group_id"] not in self.config.groups.allowed:
                 raise SummaryError("目标群已从白名单移除")
+            policy = await PolicyRepository(self.repository.db, self.config.groups.allowed).get(job["self_id"], job["group_id"])
+            if policy.mode == "ignore" or not policy.summary_enabled:
+                raise SummaryError("该群策略已暂停总结")
             messages = await self.repository.window_messages(
                 job["self_id"], job["group_id"], job["window_start"], job["window_end"],
                 self.config.deepseek.max_messages + 1)

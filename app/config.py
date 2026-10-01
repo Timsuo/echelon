@@ -43,12 +43,33 @@ class LogConfig(StrictConfig):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 
+class AttachmentConfig(StrictConfig):
+    enabled: bool = True
+    storage_dir: str = Field(default="data/attachments", min_length=1)
+    auto_download: bool = True
+    max_auto_download_mb: int = Field(default=100, ge=1, le=1024)
+    retry_count: int = Field(default=2, ge=0, le=5)
+
+    @field_validator("storage_dir")
+    @classmethod
+    def valid_storage_dir(cls, value: str) -> str:
+        if not value.strip() or "\x00" in value or ".." in Path(value).parts:
+            raise ValueError("attachments.storage_dir must be a dedicated valid directory")
+        return value
+
+
+class InboxConfig(StrictConfig):
+    default_page_size: int = Field(default=10, ge=1, le=50)
+
+
 class AppConfig(StrictConfig):
     groups: Groups = Field(default_factory=Groups)
     timezone: str = "Asia/Shanghai"
     websocket: WebSocketConfig = Field(default_factory=WebSocketConfig)
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
     logging: LogConfig = Field(default_factory=LogConfig)
+    attachments: AttachmentConfig = Field(default_factory=AttachmentConfig)
+    inbox: InboxConfig = Field(default_factory=InboxConfig)
 
     @field_validator("timezone")
     @classmethod

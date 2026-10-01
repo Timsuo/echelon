@@ -5,9 +5,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from filelock import FileLock, Timeout
 
+from app.attachments.storage import AttachmentStorage
+from app.attachments.worker import AttachmentWorker
 from app.commands.router import CommandRouter
 from app.config import ROOT, AppConfig, Secrets, load_config
 from app.jobs.service import SummaryService
@@ -17,8 +20,12 @@ from app.logging_setup import configure_logging
 from app.notifier.qq import run_notifier
 from app.onebot.actions import ActionGateway
 from app.onebot.events import EventProcessor
+from app.onebot.files import FileResolver
 from app.onebot.server import router as websocket_router
+from app.policies.worker import ConfigurationWorker
 from app.storage.db import Database
+from app.storage.inbox_repository import InboxRepository
+from app.storage.policy_repository import PolicyRepository
 from app.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -46,6 +53,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             raise RuntimeError("Monitor 已运行：拒绝启动第二实例") from error
         database = Database(root / "data/messages.db")
         client = None
+        download_client = None
         tasks: list[asyncio.Task] = []
         try:
             configure_logging(root / "logs", settings.logging.level, credentials)
@@ -55,15 +63,28 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             await repository.recover()
             started_at = time.time()
             await repository.state("start_time", str(started_at))
-            actions = ActionGateway(credentials.admin_qq, settings.websocket.action_timeout)
-            commands = CommandRouter(repository, settings, credentials.admin_qq, actions, started_at)
-            events = EventProcessor(repository, settings.groups.allowed, commands)
+            storage = AttachmentStorage(root / settings.attachments.storage_dir)
+            inbox_repository = InboxRepository(database)
+            await inbox_repository.recover()
+            actions = ActionGateway(credentials.admin_qq, settings.websocket.action_timeout,
+                                    repository, storage, settings.groups.allowed)
+            resolver = FileResolver(actions)
+            commands = CommandRouter(repository, settings, credentials.admin_qq, actions, started_at, storage)
+            events = EventProcessor(repository, settings.groups.allowed, commands, settings.attachments, resolver)
+            download_client = httpx.AsyncClient(timeout=30, trust_env=False)
+            attachment_worker = AttachmentWorker(inbox_repository, resolver, storage, settings.attachments,
+                                                 settings.groups.allowed, download_client)
             client = DeepSeekClient(settings.deepseek, credentials.deepseek_api_key.get_secret_value())
+            policies = PolicyRepository(database, settings.groups.allowed)
+            await policies.recover()
+            configuration_worker = ConfigurationWorker(policies, client)
             service = SummaryService(repository, client, settings)
             app.state.services = Services(credentials, repository, actions, events)
             tasks = [asyncio.create_task(run_worker(repository, service), name="summary-worker"),
                      asyncio.create_task(run_notifier(repository, actions, credentials.admin_qq),
                                          name="private-notifier")]
+            tasks.append(asyncio.create_task(attachment_worker.run(), name="attachment-worker"))
+            tasks.append(asyncio.create_task(configuration_worker.run(), name="configuration-worker"))
             if not settings.groups.allowed:
                 logger.warning("Group whitelist is empty; no group messages will be stored")
             if client.client is None:
@@ -80,6 +101,8 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             try:
                 if client:
                     await client.close()
+                if download_client:
+                    await download_client.aclose()
             finally:
                 try:
                     await database.close()
@@ -87,7 +110,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
                     process_lock.release()
             logger.info("Service stopped")
 
-    app = FastAPI(title="QQ Monitor", lifespan=lifespan, docs_url=None, redoc_url=None,
+    app = FastAPI(title="Echelon", lifespan=lifespan, docs_url=None, redoc_url=None,
                   openapi_url=None)
     app.include_router(websocket_router)
     return app
