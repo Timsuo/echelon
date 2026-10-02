@@ -14,7 +14,7 @@ from app.storage.repository import Repository
 async def repository(tmp_path):
     db = Database(tmp_path / "messages.db")
     await db.open()
-    repository = Repository(db)
+    repository = Repository(db, authorization_seed=[123])
     await repository.bind_onebot(88)
     yield repository
     await db.close()

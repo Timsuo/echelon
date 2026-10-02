@@ -13,6 +13,23 @@ class CommandSpec:
 
 
 COMMANDS = (
+    CommandSpec("allow", "/allow [add|remove <群号>]", "动态管理采集授权",
+        "add/remove 都先生成提案，10分钟内 /confirm 才生效。添加前验证机器人已在群内。新群默认 SUMMARY_ONLY。\n"
+        "remove 停止未来采集、历史核验、分类、下载与新的投递，但保留历史。重新添加会展示并恢复原策略。\n"
+        "ignore 仍保留授权，暂停业务处理，可 /config 恢复；remove 撤销采集授权，须 /allow add 重新添加。",
+        ("/allow", "/allow add 123456789", "/allow remove 123456789"), "群授权与策略"),
+    CommandSpec("delivery", "/delivery", "自动投递状态与偏好",
+        "Heartbeat 只在后台检查，不会每分钟发消息。urgent 来自已分类 Inbox；digest 按设置时间收信。\n"
+        "静默时段默认延后 HIGH，CRITICAL 可配置打破静默。历史回补按原消息时间和有效行动判断提醒。",
+        ("/delivery",), "自动投递"),
+    CommandSpec("notify", "/notify <自然语言>", "生成投递偏好提案",
+        "明确时间优先本地解析，其余后台解析。/notify → proposal → /confirm；/cancel 取消。\n"
+        "只修改投递偏好，不改群授权、策略或分类偏好。时间为 HH:MM，每天最多12个。",
+        ("/notify 每天7:30、12:20、18:00和22:30收信", "/notify 晚上十一点半到早上七点不要提醒我", "/notify critical 即使静默时间也提醒", "/notify high 不要打破静默", "/notify 不要发送空摘要"), "自动投递"),
+    CommandSpec("digest", "/digest now", "后台手动收信",
+        "创建持久后台任务，只整理 Phase 4 启用后新建或实质更新的 InboxItem，不重新总结全部原始群聊。\n"
+        "显式手动收信不受自动投递开关和静默时间限制；仍遵守授权、归档、已读偏好与 revision 去重。",
+        ("/digest now",), "自动投递"),
     CommandSpec("status", "/status", "服务运行状态",
         "检查 OneBot 连接、数据库消息、附件、Inbox、DeepSeek、任务和运行时间。\n"
         "/status 不检查历史覆盖完整性，历史覆盖请使用 /coverage。无修改副作用。", ("/status",), "状态与可靠性"),
@@ -40,6 +57,8 @@ COMMANDS = (
         "仅转发 downloaded 且通过账号、路径和哈希验证的附件给 ADMIN_QQ。\n"
         "不能输入文件路径；尚未完成或超限不会强行下载。发送任务进入持久 outbox。", ("/file 12 1",), "收件箱"),
     CommandSpec("summary", "/summary <时间窗口>", "按时间窗口总结群消息",
+        "/summary list：最近10份；/summary detail <id>：已保存完整版本；/summary compact <id>：压缩视图；/summary topic <id> <序号>：单话题。\n"
+        "查看历史不调用模型；撤销授权的群仍可查看旧总结。短总结默认完整，长总结自动压缩，完整内容永久保存。\n"
         "30m：最近30分钟；2h：最近2小时；today：配置时区今天00:00至当前。\n"
         "支持 m/h 窗口，最多7天。仅白名单且 Summary=ON、Mode != IGNORE 的群参与。\n"
         "创建后台任务，相关聊天文本发送给 DeepSeek；无消息时不调用模型。\n"
@@ -47,12 +66,12 @@ COMMANDS = (
     CommandSpec("groups", "/groups", "查看群策略列表",
         "SUMMARY_ONLY：保存消息、可总结、不进入 Inbox，通常不下载附件。\n"
         "INBOX：保存消息、可总结，批量 LLM 聚合消息，文件可进入 Inbox 并自动下载。\n"
-        "PRIORITY：类似 INBOX，历史回查更频繁、分类等待更短；Phase 4 才有实时优先级提醒。\n"
+        "PRIORITY：类似 INBOX，历史回查更频繁、分类等待更短；按 Priority Watch 与投递偏好提醒。\n"
         "IGNORE：停止业务采集及历史核验。\n"
         "如果只是不想收到提醒但仍希望以后总结，不要用 ignore，应使用 summary_only。\n"
-        "上述是模式默认值，独立开关可以覆盖。此命令只读。", ("/groups",), "群策略"),
+        "上述是模式默认值，独立开关可以覆盖。此命令只读。", ("/groups",), "群授权与策略"),
     CommandSpec("group", "/group <群号>", "查看单群策略",
-        "显示本账号白名单群的 alias、mode 和独立开关。\n这是群号，不是 Inbox ID。模式解释见 /help groups。", ("/group 756155087",), "群策略"),
+        "显示本账号白名单群的 alias、mode 和独立开关。\n这是群号，不是 Inbox ID。模式解释见 /help groups。", ("/group 756155087",), "群授权与策略"),
     CommandSpec("config", "/config <群号或别名> <配置意图>", "生成群策略变更提案",
         "只配置白名单内群。第一个独立数字 token 才是显式群号；正文日期、天数、MB 数字不是群号。\n"
         "别名必须唯一；同名或无匹配时请指定群号。LLM 不能生成目标群号。\n"
@@ -60,11 +79,11 @@ COMMANDS = (
         "/config → 解析 → 显示 Before → After → /confirm <id> 才生效。\n"
         "取消：/cancel <id>。提案10分钟过期，重复确认幂等；配置已变化时需重新提交。\n"
         "切换 mode 会展开模式默认开关；单独关闭下载只修改下载字段。请仔细核对 diff。\n"
-        "/config 不能将新群加入 allowlist，请手动修改 config.yaml 并重启。\n"
+        "/config 不能将新群加入 allowlist，请使用 /allow add 并确认。\n"
         "个人重要性偏好请用 /pref；与群策略共用 /confirm 和 /cancel。\n"
         "当前不支持自动到期策略或每群 MB 阈值；遇到这些要求请使用现有明确开关，不会实现定时优先级提醒。",
         ("/config 756155087 mode inbox", "/config 高数群只需要总结", "/config 高数群不要自动下载文件",
-         "/config 班级群重点关注", "/config 756155087 alias 高数群"), "群策略"),
+         "/config 班级群重点关注", "/config 756155087 alias 高数群"), "群授权与策略"),
     CommandSpec("prefs", "/prefs", "查看个人分类偏好",
         "展示本账号的重要/低优先级关键词、重要发送者和分类偏好。只读。\n"
         "偏好参与后续 LLM 分类，不自动重算旧 Inbox，也不启用即时通知。", ("/prefs",), "个人偏好"),
@@ -76,9 +95,9 @@ COMMANDS = (
         ("/pref 考试和调课对我很重要", "/pref 123456789 是老师，他的消息需要重点关注",
          "/pref 讲座通常是低优先级", "/pref 课程资料正常优先级即可"), "个人偏好"),
     CommandSpec("confirm", "/confirm <提案ID>", "应用群策略或个人偏好提案",
-        "只接受本管理员、本机器人账号、未过期的 pending 提案。\n应用显示的差异；重复确认不会重复修改。", ("/confirm 42",), "群策略"),
+        "只接受本管理员、本机器人账号、未过期的 pending 提案。\n应用显示的差异；重复确认不会重复修改。", ("/confirm 42",), "群授权与策略"),
     CommandSpec("cancel", "/cancel <提案ID>", "取消配置提案",
-        "取消 pending 提案，不修改群配置。不用于撤销已经确认的变更；撤销请创建新提案。", ("/cancel 42",), "群策略"),
+        "取消 pending 提案，不修改群配置。不用于撤销已经确认的变更；撤销请创建新提案。", ("/cancel 42",), "群授权与策略"),
     CommandSpec("help", "/help [命令]", "查看帮助",
         "不带参数显示分类首页；带命令名显示参数、行为、副作用和例子。\n所有命令仅限 ADMIN_QQ；普通私聊不触发命令。", ("/help", "/help config"), "帮助"),
 )

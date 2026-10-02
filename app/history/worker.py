@@ -30,15 +30,21 @@ class HistoryWorker:
         received = inserted = invalid = 0
         oldest = newest = None
         try:
-            if not self.config.history.enabled or job["group_id"] not in self.config.groups.allowed:
+            active_job = await self.repository.repository.query("SELECT id FROM history_sync_jobs WHERE id=? AND self_id=? AND status='running' AND attempts=?", (job['id'], job['self_id'], job['attempts']))
+            if not active_job:
+                raise PermissionError('History job no longer running')
+            version = await self.repository.repository.authorizations.version(job['self_id'], job['group_id'])
+            if not self.config.history.enabled or not await self.repository.repository.authorizations.is_active(job["self_id"], job["group_id"]):
                 raise PermissionError("History disabled or group removed")
-            policy = await PolicyRepository(self.repository.db, self.config.groups.allowed).get(job["self_id"], job["group_id"])
+            policy = await PolicyRepository(self.repository.db).get(job["self_id"], job["group_id"])
             if policy.mode == "ignore":
                 raise PermissionError("Group ignored")
             if job["attempts"] > self.config.history.retry_count + 1:
                 raise PermissionError("History retry budget exhausted after interruption")
             count = self.config.history.reconnect_count if job["mode"] == "reconnect" else self.config.history.periodic_count
             batch = await self.adapter.fetch(job["self_id"], job["group_id"], count, time.time())
+            if version != await self.repository.repository.authorizations.version(job['self_id'], job['group_id']):
+                raise PermissionError('History authorization changed during request')
             if await self.repository.repository.state("onebot_self_id") != str(job["self_id"]):
                 raise PermissionError("History account changed")
             received, invalid = batch.received, batch.invalid
@@ -50,11 +56,11 @@ class HistoryWorker:
                 if max(0, job["window_start"] - overlap) <= message["time"] <= job["window_end"] + overlap:
                     try:
                         # Original event_time remains intact. Future alerts must not use backfill received_time.
-                        inserted += await self.events.handle(message, ingest_source=source)
+                        inserted += await self.events.handle(message, ingest_source=source, authorization_version=version)
                     except (ValueError, TypeError, KeyError):
                         invalid += 1
                         logger.warning("History message normalization rejected job=%s", job["id"])
-            policy = await PolicyRepository(self.repository.db, self.config.groups.allowed).get(job["self_id"], job["group_id"])
+            policy = await PolicyRepository(self.repository.db).get(job["self_id"], job["group_id"])
             if policy.mode == "ignore":
                 raise PermissionError("Group policy changed during history ingestion")
             coverage = evaluate_coverage(oldest, newest, job["window_start"], job["window_end"], invalid)

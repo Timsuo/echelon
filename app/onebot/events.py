@@ -18,12 +18,12 @@ class EventProcessor:
     def __init__(self, repository: Repository, allowed: list[int], router: CommandRouter,
                  attachment_config: AttachmentConfig | None = None, resolver: FileResolver | None = None) -> None:
         self.repository = repository
-        self.allowed = frozenset(allowed)
         self.router = router
         self.attachment_config = attachment_config or AttachmentConfig()
         self.resolver = resolver
 
-    async def handle(self, payload: dict, *, ingest_source: Literal["realtime", "history_recovery", "history_poll"] = "realtime") -> bool:
+    async def handle(self, payload: dict, *, ingest_source: Literal["realtime", "history_recovery", "history_poll"] = "realtime",
+                     authorization_version: float | None = None) -> bool:
         if ingest_source != "realtime" and (payload.get("message_type") != "group" or payload.get("post_type") != "message"):
             logger.warning("Non-group history event rejected")
             return False
@@ -33,10 +33,11 @@ class EventProcessor:
         if event.message_type == "private":
             await self.router.dispatch(event)
             return False
-        if event.group_id not in self.allowed:
+        version = await self.repository.authorizations.version(event.self_id, event.group_id)
+        if version is None or (authorization_version is not None and version != authorization_version):
             logger.info("Group filtered group_id=%s", event.group_id)
             return False
-        policy = await PolicyRepository(self.repository.db, list(self.allowed)).get(event.self_id, event.group_id)
+        policy = await PolicyRepository(self.repository.db).get(event.self_id, event.group_id)
         if policy.mode == "ignore":
             logger.info("Group ignored by policy group_id=%s", event.group_id)
             return False
@@ -52,6 +53,7 @@ class EventProcessor:
             "normalized_text": normalized.text, "reply_to_message_id": normalized.reply_to_message_id,
             "message_json": json.dumps(stored_payload, ensure_ascii=False),
             "ingest_source": ingest_source,
+            "authorization_version": version,
         }
         files = file_references(event, payload.get("post_type", "message")) if self.attachment_config.enabled else []
         callback = (lambda states: self.resolver.reconcile(files, states)) if self.resolver else None

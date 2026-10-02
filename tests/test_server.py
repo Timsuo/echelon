@@ -63,7 +63,7 @@ def test_reconnect_and_account_binding(tmp_path, config):
 def test_summary_end_to_end(tmp_path, config, monkeypatch):
     async def summarize(self, text, on_retry):
         assert "untrusted_chat_records" in text
-        return SummaryData(topics=[Topic(title="讨论", summary="测试总结", participants=["Card"])],
+        return SummaryData(topics=[Topic(title="讨论", summary="测试总结", participants=["Card"], start_message_id="1", end_message_id="1")],
                            decisions=[], todos=[], important_events=[], uncertainties=[],
                            notable_message_ids=["1"])
 

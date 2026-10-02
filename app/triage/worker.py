@@ -20,7 +20,7 @@ class TriageWorker:
         try:
             if not config.triage.enabled or job['attempts'] > config.triage.retry_count + 1:
                 raise PermissionError("Triage disabled or retry budget exhausted")
-            policy = await PolicyRepository(repo.db, config.groups.allowed).get(job['self_id'], job['group_id'])
+            policy = await PolicyRepository(repo.db).get(job['self_id'], job['group_id'])
             if policy.mode not in {'inbox', 'priority'} or not policy.inbox_enabled:
                 raise PermissionError("Triage policy paused")
             if await repo.repository.state('onebot_self_id') != str(job['self_id']):

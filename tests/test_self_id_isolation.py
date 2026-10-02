@@ -9,6 +9,8 @@ from tests.conftest import event
 
 
 async def test_window_messages_isolated_by_self_id(processor, repository):
+    await repository.authorizations.activate(111, 123)
+    await repository.authorizations.activate(222, 123)
     await processor.handle(event(self_id=111, message="A"))
     await processor.handle(event(self_id=222, message="B"))
     rows = await repository.window_messages(111, 123, 0, 9999999999, 100)
@@ -16,6 +18,8 @@ async def test_window_messages_isolated_by_self_id(processor, repository):
 
 
 async def test_job_and_summary_keep_original_account_after_switch(processor, repository, config):
+    await repository.authorizations.activate(111, 123)
+    await repository.authorizations.activate(222, 123)
     await repository.state("onebot_self_id", "111")
     await processor.handle(event(self_id=111, message="account A only"))
     await processor.handle(event(self_id=222, message="account B only"))

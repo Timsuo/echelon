@@ -10,20 +10,30 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigurationWorker:
-    def __init__(self, repository: PolicyRepository, llm: DeepSeekClient) -> None:
+    def __init__(self, repository: PolicyRepository, llm: DeepSeekClient, actions=None) -> None:
         self.repository = repository
         self.llm = llm
+        self.actions = actions
 
     async def execute(self, request: dict) -> None:
         try:
+            if request.get('kind') == 'group_authorization':
+                from app.commands.authorization import verify_request
+                await verify_request(self.repository, self.actions, request)
+                return
+            if request.get('kind') == 'delivery_preferences':
+                from app.delivery.preferences import DeliveryPreferenceRepository
+                intent = await self.llm.parse_delivery_preferences(request['input_text'], lambda: self.repository.retry(request['id']))
+                await DeliveryPreferenceRepository(self.repository).propose(request, intent)
+                return
             if request.get('kind') == 'triage_preferences':
                 intent = await self.llm.parse_preferences(request['input_text'], lambda: self.repository.retry(request['id']))
                 await PreferenceRepository(self.repository).propose(request, intent)
                 return
-            self.repository.check_group(request["group_id"])
+            await self.repository.check_group(request["self_id"], request["target_group_id"])
             intent = await self.llm.parse_config(request["input_text"], lambda: self.repository.retry(request["id"]))
             ConfigIntentParser.validate_intent(intent, request["input_text"])
-            await self.repository.propose(request["self_id"], request["admin_qq"], request["group_id"], intent, request["id"])
+            await self.repository.propose(request["self_id"], request["admin_qq"], request["target_group_id"], intent, request["id"])
         except Exception as error:
             # Never echo raw model/user input or validation internals to logs/outbox.
             safe = str(error) if isinstance(error, SummaryError) else type(error).__name__

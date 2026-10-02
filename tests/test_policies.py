@@ -168,8 +168,10 @@ async def test_proposal_account_admin_and_allowlist_guards(repository, policies)
     for self_id, admin in ((222, 99), (88, 100)):
         with pytest.raises(ValueError):
             await policies.resolve(self_id, admin, identifier, True)
+    await repository.authorizations.deactivate(88, 123)
     with pytest.raises(ValueError):
-        await PolicyRepository(repository.db, []).resolve(88, 99, identifier, True)
+        await policies.resolve(88, 99, identifier, True)
+    await repository.authorizations.activate(88, 123)
     with pytest.raises(ValueError):
         await policies.propose(88, 99, 999, intent(mode="inbox"))
     assert (await policies.get(88, 123)).mode == "summary_only"
@@ -220,7 +222,7 @@ async def test_natural_language_scenarios_propose_then_confirm(text, changes, pr
         assert after.alias == changes["alias"]
     if changes["mode"] == "priority":
         assert after.priority_watch_enabled
-        assert any("Phase 4" in row["text"] for row in await repository.query("SELECT text FROM private_outbox"))
+        assert any("Priority Watch" in row["text"] for row in await repository.query("SELECT text FROM private_outbox"))
 
 
 async def test_natural_file_toggle_is_local_minimal_change(processor, repository, policies):

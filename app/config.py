@@ -99,6 +99,20 @@ class TriageConfig(StrictConfig):
         return self
 
 
+class SummaryConfig(StrictConfig):
+    previous_summary_limit: int = Field(default=3, ge=0, le=10)
+    previous_summary_lookback_hours: int = Field(default=48, ge=1, le=168)
+    compact_threshold_chars: int = Field(default=1600, ge=500, le=10000)
+    compact_target_chars: int = Field(default=1000, ge=300, le=5000)
+    compact_max_topics: int = Field(default=5, ge=1, le=10)
+
+    @model_validator(mode='after')
+    def lengths(self):
+        if self.compact_target_chars > self.compact_threshold_chars:
+            raise ValueError('compact target must not exceed threshold')
+        return self
+
+
 class AppConfig(StrictConfig):
     groups: Groups = Field(default_factory=Groups)
     timezone: str = "Asia/Shanghai"
@@ -109,6 +123,7 @@ class AppConfig(StrictConfig):
     inbox: InboxConfig = Field(default_factory=InboxConfig)
     history: HistoryConfig = Field(default_factory=HistoryConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
+    summary: SummaryConfig = Field(default_factory=SummaryConfig)
 
     @field_validator("timezone")
     @classmethod

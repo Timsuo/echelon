@@ -79,7 +79,7 @@ async def test_file_url_removed_from_cq_persistence_but_pending_resolver_can_use
 
 
 @pytest.mark.parametrize("name,expected", [("", "状态与可靠性"), ("summary", "Coverage Warning"), ("config", "10分钟"),
-    ("coverage", "LIKELY_COVERED"), ("sync", "best-effort"), ("groups", "Phase 4"), ("inbox", "read"), ("file", "不能输入文件路径")])
+    ("coverage", "LIKELY_COVERED"), ("sync", "best-effort"), ("groups", "Priority Watch"), ("inbox", "read"), ("file", "不能输入文件路径")])
 async def test_help_commands(name, expected, processor, repository):
     await processor.router.dispatch(command("/help " + name))
     text = (await repository.query("SELECT text FROM private_outbox"))[0]["text"]

@@ -83,8 +83,7 @@ async def test_debounce_and_hard_max_wait(mode, debounce, maximum, repository, p
 
 async def test_candidate_limits_and_group_isolation(repository, processor, config):
     config.triage.max_messages_per_candidate = 2
-    config.groups.allowed.append(456)
-    processor.allowed = frozenset(config.groups.allowed)
+    await repository.authorizations.activate(88, 456)
     for group in (123, 456):
         await set_policy(repository, group_id=group)
         for index in range(3):
@@ -123,7 +122,7 @@ async def test_account_isolation_and_composite_constraints(repository, processor
     with pytest.raises(sqlite3.IntegrityError):
         await repository.query('INSERT INTO triage_job_messages VALUES (?,?,?,?)', (job['id'], other, 88, 123))
     with pytest.raises(sqlite3.IntegrityError):
-        await repository.query('INSERT INTO triage_message_state VALUES (?,?,?, ?,NULL,1)', (999, 88, 123, 'pending'))
+        await repository.query('INSERT INTO triage_message_state(message_id,self_id,group_id,status,triage_job_id,created_at) VALUES (?,?,?, ?,NULL,1)', (999, 88, 123, 'pending'))
 
 
 async def test_restart_preserves_ownership_and_attempt_budget(repository, processor, config):

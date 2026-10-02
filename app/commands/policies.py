@@ -31,7 +31,7 @@ class PolicyCommands:
             raise ValueError("用法：/groups")
         rows = await self.policies.listing(event.self_id)
         await self.repository.notify("【Echelon Groups】\n\n" + "\n\n".join(map(describe, rows)) +
-            "\n\n/group <群号>\n/config <群号或别名> ...\nPriority Watch 仅保存设置，Phase 4 才启用提醒。", event.self_id)
+            "\n\n/group <群号>\n/config <群号或别名> ...\nPriority Watch 配合 /delivery 控制即时提醒。", event.self_id)
 
     @staticmethod
     def identifier(argument: str) -> int:

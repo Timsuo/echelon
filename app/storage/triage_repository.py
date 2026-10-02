@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 
 from app.config import AppConfig
+from app.storage.authorization_repository import is_active
 from app.storage.history_repository import rows
 from app.storage.policy_repository import read_policy
 from app.storage.repository import Repository
@@ -30,12 +31,12 @@ class TriageRepository:
                 return None
             self_id = int(bound[0]['value'])
             # One transaction allocates ownership and claims work. No parallel candidates own a message.
-            pending_groups = await rows(connection, "SELECT group_id,MIN(created_at) AS first_at,MAX(created_at) AS last_at "
+            pending_groups = await rows(connection, "SELECT group_id,MIN(created_at) AS first_at,MAX(created_at) AS last_at,MIN(fast_track_at) AS fast_at "
                 "FROM triage_message_state WHERE self_id=? AND status='pending' GROUP BY group_id ORDER BY first_at", (self_id,))
             for group in pending_groups:
                 group_id = group['group_id']
                 policy = await read_policy(connection, self_id, group_id)
-                if group_id not in self.config.groups.allowed or policy.mode not in {'inbox', 'priority'} or not policy.inbox_enabled:
+                if not await is_active(connection, self_id, group_id) or policy.mode not in {'inbox', 'priority'} or not policy.inbox_enabled:
                     # Policy-paused pending messages remain durable, not silently discarded.
                     continue
                 available = await rows(connection, "SELECT m.* FROM triage_message_state s JOIN messages m ON m.id=s.message_id "
@@ -53,6 +54,11 @@ class TriageRepository:
                     times = proposed
                 due = min(group['last_at'] + getattr(config, policy.mode + '_debounce_seconds'),
                           group['first_at'] + getattr(config, policy.mode + '_max_wait_seconds'))
+                if group['fast_at'] is not None:
+                    from app.delivery.preferences import read_delivery_preferences
+                    delivery_prefs = await read_delivery_preferences(connection, self_id)
+                    if delivery_prefs.enabled and delivery_prefs.fast_track_enabled:
+                        due = min(due, max(group['fast_at'], group['last_at'] + delivery_prefs.fast_track_debounce_seconds))
                 if now < due and len(chosen) == len(available) and len(chosen) < config.max_messages_per_candidate:
                     continue
                 sources = {m['ingest_source'] == 'realtime' for m in chosen}
@@ -66,6 +72,7 @@ class TriageRepository:
                 logger.info("Triage candidate created id=%s messages=%s", job['id'], len(chosen))
             claimed = await rows(connection, "UPDATE triage_jobs SET status='running',started_at=?,attempts=attempts+1,"
                 "retry_count=attempts WHERE id=(SELECT id FROM triage_jobs WHERE self_id=? AND status='queued' AND not_before<=? "
+                "AND EXISTS (SELECT 1 FROM group_authorizations a WHERE a.self_id=triage_jobs.self_id AND a.group_id=triage_jobs.group_id AND a.active=1) "
                 "ORDER BY id LIMIT 1) AND status='queued' RETURNING *", (now, self_id, now))
             return claimed[0] if claimed else None
 
@@ -94,7 +101,7 @@ class TriageRepository:
                 raise ValueError("Triage job is not running")
             bound = await rows(connection, "SELECT value FROM runtime_state WHERE key='onebot_self_id'")
             policy = await read_policy(connection, job['self_id'], job['group_id'])
-            if not bound or bound[0]['value'] != str(job['self_id']) or job['group_id'] not in self.config.groups.allowed or policy.mode not in {'inbox', 'priority'} or not policy.inbox_enabled:
+            if not bound or bound[0]['value'] != str(job['self_id']) or not await is_active(connection, job['self_id'], job['group_id']) or policy.mode not in {'inbox', 'priority'} or not policy.inbox_enabled:
                 raise PermissionError("Triage account or policy changed")
             messages = await rows(connection, "SELECT m.* FROM messages m JOIN triage_job_messages l ON l.message_id=m.id "
                 "AND l.self_id=m.self_id AND l.group_id=m.group_id WHERE l.job_id=? AND l.self_id=?", (job['id'], job['self_id']))
@@ -148,6 +155,9 @@ class TriageRepository:
                     material = any(current[key] != values[key] for key in
                         ('title', 'summary', 'category', 'priority', 'action_required', 'action_text', 'deadline_text', 'deadline_at')) or old_labels != set(item.labels)
                     revision = current['revision'] + int(material)
+                if current is None or revision > current['revision']:
+                    await connection.execute("INSERT INTO inbox_revision_events(self_id,inbox_item_id,revision,triage_job_id,group_id,created_at) VALUES (?,?,?,?,?,?)",
+                        (job['self_id'], target, revision, job['id'], job['group_id'], now))
                 coverage = 'warning' if coverage_warning or (current and current['coverage_status'] == 'warning') else 'no_known_gap'
                 await connection.execute(f"UPDATE inbox_items SET {','.join(key+'=?' for key in values)},revision=?,triaged_at=?,triage_model=?,coverage_status=?,updated_at=? WHERE id=? AND self_id=?",
                     (*values.values(), revision, now, model, coverage, now, target, job['self_id']))

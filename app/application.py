@@ -13,6 +13,8 @@ from app.attachments.storage import AttachmentStorage
 from app.attachments.worker import AttachmentWorker
 from app.commands.router import CommandRouter
 from app.config import ROOT, AppConfig, Secrets, load_config
+from app.delivery.repository import DeliveryRepository
+from app.delivery.worker import DeliveryWorker
 from app.history.worker import HistoryWorker
 from app.jobs.service import SummaryService
 from app.jobs.worker import run_worker
@@ -66,7 +68,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             configure_logging(root / "logs", settings.logging.level, credentials)
             logger.info("Service starting")
             await database.open()
-            repository = Repository(database, settings.triage)
+            repository = Repository(database, settings.triage, settings.groups.allowed)
             history = HistoryRepository(repository, settings)
             await history.startup()
             await repository.recover()
@@ -76,21 +78,22 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             inbox_repository = InboxRepository(database)
             await inbox_repository.recover()
             actions = ActionGateway(credentials.admin_qq, settings.websocket.action_timeout,
-                                    repository, storage, settings.groups.allowed)
+                                    repository, storage)
             resolver = FileResolver(actions)
             commands = CommandRouter(repository, settings, credentials.admin_qq, actions, started_at, storage)
-            events = EventProcessor(repository, settings.groups.allowed, commands, settings.attachments, resolver)
+            events = EventProcessor(repository, None, commands, settings.attachments, resolver)
             history_worker = HistoryWorker(history, HistoryAdapter(actions), events)
             download_client = httpx.AsyncClient(timeout=30, trust_env=False)
             attachment_worker = AttachmentWorker(inbox_repository, resolver, storage, settings.attachments,
-                                                 settings.groups.allowed, download_client)
+                                                 None, download_client)
             client = DeepSeekClient(settings.deepseek, credentials.deepseek_api_key.get_secret_value())
-            policies = PolicyRepository(database, settings.groups.allowed)
+            policies = PolicyRepository(database)
             await policies.recover()
-            configuration_worker = ConfigurationWorker(policies, client)
+            configuration_worker = ConfigurationWorker(policies, client, actions)
             triage_repository = TriageRepository(repository, settings)
             await triage_repository.recover()
             triage_worker = TriageWorker(triage_repository, client)
+            delivery_worker = DeliveryWorker(DeliveryRepository(repository, settings))
             service = SummaryService(repository, client, settings)
             app.state.services = Services(credentials, repository, actions, events, history)
             tasks = [asyncio.create_task(run_worker(repository, service), name="summary-worker"),
@@ -100,8 +103,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             tasks.append(asyncio.create_task(configuration_worker.run(), name="configuration-worker"))
             tasks.append(asyncio.create_task(history_worker.run(), name="history-worker"))
             tasks.append(asyncio.create_task(triage_worker.run(), name="triage-worker"))
-            if not settings.groups.allowed:
-                logger.warning("Group whitelist is empty; no group messages will be stored")
+            tasks.append(asyncio.create_task(delivery_worker.run(), name="delivery-worker"))
             if client.client is None:
                 logger.warning("DeepSeek key missing; collection and status remain available")
             logger.info("Service ready")

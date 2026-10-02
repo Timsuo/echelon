@@ -3,6 +3,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from app.attachments.storage import AttachmentStorage
+from app.commands.authorization import AuthorizationCommands
+from app.commands.delivery import DeliveryCommands
 from app.commands.help import COMMANDS, render_help
 from app.commands.history import HistoryCommands
 from app.commands.inbox import InboxCommands
@@ -30,10 +32,13 @@ class CommandRouter:
         self.actions = actions
         self.started_at = started_at
         inbox = InboxCommands(repository, config, storage)
-        policies = PolicyCommands(repository, config.groups.allowed, admin_qq)
+        policies = PolicyCommands(repository, None, admin_qq)
         history = HistoryCommands(repository, config, actions)
-        preferences = PreferenceCommands(repository, config.groups.allowed, admin_qq)
+        preferences = PreferenceCommands(repository, None, admin_qq)
+        authorization = AuthorizationCommands(repository, admin_qq)
+        delivery = DeliveryCommands(repository, config, admin_qq)
         handlers: dict[str, CommandHandler] = {
+            "/allow": authorization.allow, "/delivery": delivery.delivery, "/notify": delivery.notify, "/digest": delivery.digest,
             "/help": self.help, "/coverage": history.coverage, "/sync": history.sync,
             "/status": self.status, "/summary": self.summary,
             "/inbox": inbox.listing, "/detail": inbox.detail, "/archive": inbox.archive, "/file": inbox.file,
@@ -66,7 +71,7 @@ class CommandRouter:
             await handler(event, argument)
         except ValueError as error:
             # Only our own argument validation reaches here, never raw LLM/event payloads.
-            await self.repository.notify(str(error))
+            await self.repository.notify(str(error), event.self_id)
 
     async def help(self, event: MessageEvent, argument: str) -> None:
         await self.repository.notify(render_help(argument), event.self_id)
@@ -78,10 +83,11 @@ class CommandRouter:
             self.repository, self.actions, self.config, self.started_at))
 
     async def summary(self, event: MessageEvent, argument: str) -> None:
+        from app.commands.saved_summaries import SavedSummaryCommands
+        if await SavedSummaryCommands(self.repository, self.config).handle(event, argument):
+            return
         start, end = parse_window(argument, datetime.now(UTC), self.config.timezone)
-        if not self.config.groups.allowed:
-            raise ValueError("尚未配置监听群，请修改 config/config.yaml 并重启")
-        policies = await PolicyRepository(self.repository.db, self.config.groups.allowed).listing(event.self_id)
+        policies = await PolicyRepository(self.repository.db).listing(event.self_id)
         groups = [p.group_id for p in policies if p.mode != "ignore" and p.summary_enabled]
         if not groups:
             raise ValueError("当前没有启用总结的群，请查看 /groups")

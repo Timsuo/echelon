@@ -47,7 +47,7 @@ class HistoryCommands:
         if not gaps:
             lines.append("尚无已记录断连；这不代表没有漏报。")
         lines.append("\n最近周期核验：")
-        for policy in await PolicyRepository(self.repository.db, self.config.groups.allowed).listing(sid):
+        for policy in await PolicyRepository(self.repository.db).listing(sid):
             records = await self.repository.query("SELECT * FROM history_sync_state WHERE self_id=? AND group_id=?", (sid, policy.group_id))
             row = records[0] if records else {}
             lines.append(f"{policy.alias or policy.group_id}：{stamp(row.get('last_periodic_at'), zone)}；"

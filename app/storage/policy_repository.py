@@ -3,6 +3,7 @@ import logging
 import time
 
 from app.policies.models import POLICY_FIELDS, ConfigIntent, GroupPolicy
+from app.storage.authorization_repository import active_ids, is_active
 from app.storage.db import Database
 from app.storage.repository import Repository
 
@@ -39,27 +40,29 @@ def render_proposal(identifier: int, data: dict) -> str:
         lines.append(f"{key}: {data['before'][key]} → {value}")
     lines.extend(["10 分钟内确认应用：", f"/confirm {identifier}", f"/cancel {identifier}"])
     if data["after"].get("priority_watch_enabled"):
-        lines.append("Phase 2 只保存 Priority Watch 设置；即时高优先级提醒将在 Phase 4 启用。")
+        lines.append("Priority Watch 开启后，符合投递偏好的 HIGH / CRITICAL 可自动提醒。")
     return "\n".join(lines)
 
 
 class PolicyRepository:
-    def __init__(self, db: Database, allowed: list[int] | tuple[int, ...]) -> None:
+    def __init__(self, db: Database, allowed=None) -> None:
         self.db = db
-        self.allowed = frozenset(allowed)
 
-    def check_group(self, group_id: int) -> None:
-        if group_id not in self.allowed:
-            raise ValueError("该群目前不在 Echelon 采集白名单中。请先在 config.yaml 中加入该群并重启。")
+    async def check_group(self, self_id: int, group_id: int, connection=None) -> None:
+        if connection is None:
+            async with self.db.transaction() as connection:
+                return await self.check_group(self_id, group_id, connection)
+        if not await is_active(connection, self_id, group_id):
+            raise ValueError("该群当前未授权采集。请先 /allow add <群号> 并确认。")
 
     async def get(self, self_id: int, group_id: int) -> GroupPolicy:
-        self.check_group(group_id)
         async with self.db.transaction() as connection:
+            await self.check_group(self_id, group_id, connection)
             return await read_policy(connection, self_id, group_id)
 
     async def listing(self, self_id: int) -> list[GroupPolicy]:
         async with self.db.transaction() as connection:
-            return [await read_policy(connection, self_id, group_id) for group_id in sorted(self.allowed)]
+            return [await read_policy(connection, self_id, group_id) for group_id in await active_ids(connection, self_id)]
 
     async def _account(self, connection, self_id: int) -> None:
         async with connection.execute("SELECT value FROM runtime_state WHERE key='onebot_self_id'") as cursor:
@@ -69,9 +72,9 @@ class PolicyRepository:
 
     async def propose(self, self_id: int, admin_qq: int, group_id: int, intent: ConfigIntent,
                       request_id: int | None = None) -> int | None:
-        self.check_group(group_id)
         async with self.db.transaction() as connection:
             await self._account(connection, self_id)
+            await self.check_group(self_id, group_id, connection)
             current = await read_policy(connection, self_id, group_id)
             after = {key: value for key, value in intent.changes.expanded().items()
                      if getattr(current, key) != value}
@@ -93,50 +96,18 @@ class PolicyRepository:
             return identifier
 
     async def resolve(self, self_id: int, admin_qq: int, identifier: int, confirm: bool) -> str:
-        async with self.db.transaction() as connection:
-            await self._account(connection, self_id)
-            async with connection.execute("SELECT * FROM configuration_proposals WHERE id=? AND self_id=? AND admin_qq=?",
-                                           (identifier, self_id, admin_qq)) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
-                raise ValueError("配置提案不存在")
-            if row["status"] != "pending":
-                return "该提案已处理：" + row["status"]
-            if row["expires_at"] <= time.time():
-                await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
-                return "配置提案已过期，请重新提交 /config 或 /pref。"
-            if confirm:
-                data = json.loads(row["intent_json"])
-                if row['kind'] == 'triage_preferences':
-                    from app.storage.preference_repository import apply_preference_proposal
-                    applied = await apply_preference_proposal(connection, self_id, data)
-                elif row['kind'] == 'group_policy':
-                    self.check_group(data["group_id"])
-                    current = await read_policy(connection, self_id, data["group_id"])
-                    applied = not any(getattr(current, key) != value for key, value in data["before"].items())
-                    if applied:
-                        # Apply displayed diff only; never expand a profile twice.
-                        updated = GroupPolicy.model_validate(current.model_dump() | data["after"])
-                        await save_policy(connection, updated)
-                else:
-                    raise ValueError("未知配置提案类型")
-                if not applied:
-                    await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
-                    return "配置已发生变化，该提案已失效，请重新提交 /config 或 /pref。"
-            status = "confirmed" if confirm else "cancelled"
-            await connection.execute("UPDATE configuration_proposals SET status=? WHERE id=?", (status, identifier))
-            logger.info("Configuration proposal %s id=%s", status, identifier)
-            return "配置已更新。" if confirm else "配置提案已取消。"
+        from app.policies.proposals import ConfigurationProposalService
+        return await ConfigurationProposalService(self).resolve(self_id, admin_qq, identifier, confirm)
 
     async def queue(self, self_id: int, admin_qq: int, group_id: int, message_id: str, text: str) -> None:
-        self.check_group(group_id)
         async with self.db.transaction() as connection:
             await self._account(connection, self_id)
+            await self.check_group(self_id, group_id, connection)
             async with connection.execute("SELECT count(*) FROM configuration_requests WHERE status IN ('queued','running')") as cursor:
                 if (await cursor.fetchone())[0] >= 20:
                     raise ValueError("配置解析队列已满，请稍后再试")
-            await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING", (self_id, admin_qq, group_id, message_id, text, time.time()))
+            await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,target_group_id) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING", (self_id, admin_qq, group_id, message_id, text, time.time(), group_id))
             await enqueue_text(connection, "正在解析配置意图；完成后将发送提案，确认前不会修改配置。", self_id)
 
     async def recover(self) -> None:
@@ -157,7 +128,10 @@ class PolicyRepository:
     async def failed(self, request: dict, error: str) -> None:
         async with self.db.transaction() as connection:
             await connection.execute("UPDATE configuration_requests SET status='failed',error=? WHERE id=?", (error, request["id"]))
-            hint = "请用 /pref 明确说明偏好后重试。" if request.get('kind') == 'triage_preferences' else "可使用 /config <群号> mode inbox 等明确命令。"
+            hint = {'triage_preferences': '请用 /pref 明确说明偏好后重试。',
+                    'delivery_preferences': '请用 /notify 明确说明投递时间或开关后重试。',
+                    'group_authorization': '请确认机器人已加入该群且 OneBot 在线，再用 /allow add 重试。'}.get(
+                        request.get('kind'), '可使用 /config <群号> mode inbox 等明确命令。')
             await enqueue_text(connection, "配置解析失败：" + error + "。" + hint, request["self_id"])
 
     async def retry(self, identifier: int) -> None:

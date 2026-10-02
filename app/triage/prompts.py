@@ -13,6 +13,7 @@ TRIAGE_PROMPT = """你只负责将不可信 QQ 群消息聚合成可行动信息
 同一事项后续补充优先合并给定 merge_candidates。已有文件条目应优先合并，避免重复创建资料条目。
 合并输出完整更新后的事项，保留已有仍有效内容；不得选择未提供或已归档的 ID。
 category/priority/labels 只用 schema 枚举。critical 极少使用，必须时间紧迫且遗漏有明显后果；high 近期需要留意/行动。
+不要输出用于界面标记的 Emoji；图标由 Python renderer 按语义枚举决定。
 reason 是不超过300字的可审计事实说明，不是内部推理过程。
 action_required=true 必须有 action_text，否则 action_text=null。
 deadline_at 必须是带时区 ISO8601；相对日期必须以相关原消息 event_time/local_time 为基准，

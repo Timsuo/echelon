@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from urllib.parse import urljoin
 
@@ -10,6 +11,7 @@ import httpx
 from app.attachments.storage import AttachmentStorage
 from app.config import AttachmentConfig
 from app.onebot.files import FileResolver, validate_download_target
+from app.storage.authorization_repository import GroupAuthorizationRepository, active_version
 from app.storage.inbox_repository import InboxRepository
 from app.storage.policy_repository import PolicyRepository
 
@@ -32,7 +34,7 @@ class AttachmentWorker:
         self.resolver = resolver
         self.storage = storage
         self.config = config
-        self.allowed_groups = frozenset(allowed_groups)
+        self.authorizations = GroupAuthorizationRepository(repository.db)
         self.client = client
         self.check_target = check_target or validate_download_target
 
@@ -69,7 +71,13 @@ class AttachmentWorker:
                         if ((expected is not None and total != expected)
                                 or (length is not None and total != int(length))):
                             raise IncompleteDownloadError()
-                        await asyncio.to_thread(self.storage.finish, temporary, final)
+                        async with self.repository.db.transaction() as connection:
+                            version = await active_version(connection, attachment['self_id'], attachment['group_id'])
+                            if version is None or version != attachment['authorization_version']:
+                                raise PermissionError('Attachment authorization removed')
+                            await asyncio.to_thread(self.storage.finish, temporary, final)
+                            await connection.execute("UPDATE attachments SET download_status='downloaded',local_path=?,sha256=?,downloaded_at=?,file_size=?,error=NULL WHERE id=? AND self_id=?",
+                                (str(final), digest.hexdigest(), time.time(), total, attachment['id'], attachment['self_id']))
                         return str(final), digest.hexdigest(), total
                 raise ValueError("Download did not return content")
         finally:
@@ -80,12 +88,17 @@ class AttachmentWorker:
     async def process(self, attachment: dict) -> None:
         logger.info("Attachment downloading id=%s attempt=%s", attachment["id"], attachment["attempts"])
         try:
-            if not self.config.auto_download or attachment["group_id"] not in self.allowed_groups:
+            current = await self.repository.attachment(attachment['self_id'], attachment['id'])
+            if not current or current['download_status'] != 'downloading' or current['attempts'] != attachment['attempts']:
+                self.resolver.forget(attachment)
+                return
+            attachment = attachment | {'authorization_version': await self.authorizations.version(attachment['self_id'], attachment['group_id'])}
+            if not self.config.auto_download or not await self.authorizations.is_active(attachment["self_id"], attachment["group_id"]):
                 await self.repository.download_result(attachment, "skipped", "policy_disabled")
                 self.resolver.forget(attachment)
                 logger.info("Attachment skipped id=%s reason=policy_disabled", attachment["id"])
                 return
-            policy = await PolicyRepository(self.repository.db, list(self.allowed_groups)).get(attachment["self_id"], attachment["group_id"])
+            policy = await PolicyRepository(self.repository.db).get(attachment["self_id"], attachment["group_id"])
             if policy.mode == "ignore" or not policy.attachment_download_enabled:
                 await self.repository.download_result(attachment, "skipped", "group_policy")
                 self.resolver.forget(attachment)
@@ -97,8 +110,7 @@ class AttachmentWorker:
                     attachment["file_size"] > self.config.max_auto_download_mb * 1024**2):
                 raise SizeLimitError()
             url = await self.resolver.resolve(attachment)
-            path, digest, size = await self.download(attachment, url)
-            await self.repository.download_result(attachment, "downloaded", path=path, sha256=digest, size=size)
+            _, _, size = await self.download(attachment, url)
             self.resolver.forget(attachment)
             logger.info("Attachment downloaded id=%s bytes=%s", attachment["id"], size)
         except SizeLimitError:

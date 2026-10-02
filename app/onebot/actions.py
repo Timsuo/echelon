@@ -8,12 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.attachments.storage import AttachmentStorage, safe_filename
 from app.onebot.adapter import parse_self_id, response_echo
+from app.onebot.groups import GroupInfoQuery, GroupListQuery
 from app.onebot.history import GroupHistoryQuery
+from app.storage.authorization_repository import is_active
 from app.storage.inbox_repository import InboxRepository
 from app.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
-READ_ONLY_ACTIONS = frozenset({"get_group_file_url", "get_group_msg_history"})
+READ_ONLY_ACTIONS = frozenset({"get_group_file_url", "get_group_msg_history", "get_group_info", "get_group_list"})
 PRIVATE_OUTPUT_ACTIONS = frozenset({"send_private_msg", "upload_private_file"})
 ALLOWED_ACTIONS = READ_ONLY_ACTIONS | PRIVATE_OUTPUT_ACTIONS
 
@@ -55,7 +57,6 @@ class ActionGateway:
         self._send_lock = asyncio.Lock()
         self.repository = repository
         self.storage = storage
-        self.allowed_groups = frozenset(allowed_groups or [])
         self.self_id: int | None = None
 
     @property
@@ -107,16 +108,22 @@ class ActionGateway:
             request = PrivateMessage.model_validate(params)
             wire_params = {"user_id": request.user_id,
                            "message": [{"type": "text", "data": {"text": request.text}}], "auto_escape": True}
+        elif action in {"get_group_info", "get_group_list"}:
+            query = (GroupInfoQuery if action == "get_group_info" else GroupListQuery).model_validate(params)
+            await self._check_account(query.self_id)
+            wire_params = query.model_dump(exclude={"self_id"})
+            if action == "get_group_list":
+                wire_params["no_cache"] = True
         elif action == "get_group_msg_history":
             history = GroupHistoryQuery.model_validate(params)
             await self._check_account(history.self_id)
-            if history.group_id not in self.allowed_groups:
+            if not await self.repository.authorizations.is_active(history.self_id, history.group_id):
                 raise PermissionError("Group is not allowed")
             wire_params = history.wire()
         elif action == "get_group_file_url":
             query = GroupFileQuery.model_validate(params)
             await self._check_account(query.self_id)
-            if query.group_id not in self.allowed_groups:
+            if not await self.repository.authorizations.is_active(query.self_id, query.group_id):
                 raise PermissionError("Group is not allowed")
             wire_params = query.model_dump(exclude={"self_id"})
         else:
@@ -125,7 +132,7 @@ class ActionGateway:
             if self.repository is None or self.storage is None:
                 raise PermissionError("File output unavailable")
             attachment = await InboxRepository(self.repository.db).attachment(file.self_id, file.attachment_id)
-            if attachment is None or attachment["group_id"] not in self.allowed_groups:
+            if attachment is None:
                 raise PermissionError("Attachment not permitted")
             path = await asyncio.to_thread(self.storage.verify, attachment)
             wire_params = {"user_id": self.admin_qq, "file": str(path), "name": safe_filename(attachment["filename"])}
@@ -139,11 +146,19 @@ class ActionGateway:
                 async with self._send_lock:
                     if self._socket is None or self._socket is not target_socket:
                         raise ConnectionError("OneBot disconnected")
-                    await self._socket.send_json({
-                        "action": action,
-                        "params": wire_params,
-                        "echo": echo,
-                    })
+                    payload = {"action": action, "params": wire_params, "echo": echo}
+                    if action in READ_ONLY_ACTIONS:
+                        # Serialize the final authorization check and wire send with revoke.
+                        async with self.repository.db.transaction() as connection:
+                            async with connection.execute("SELECT value FROM runtime_state WHERE key='onebot_self_id'") as cursor:
+                                bound = await cursor.fetchone()
+                            if self._socket is not target_socket or self.self_id != params['self_id'] or not bound or bound[0] != str(params['self_id']):
+                                raise PermissionError("Action account changed")
+                            if action in {'get_group_file_url', 'get_group_msg_history'} and not await is_active(connection, params['self_id'], params['group_id']):
+                                raise PermissionError("Group authorization removed")
+                            await self._send_payload(payload)
+                    else:
+                        await self._send_payload(payload)
                 response = await future
             if response.get("status") != "ok" or response.get("retcode") != 0:
                 raise ActionRejectedError("OneBot rejected allowed action")
@@ -158,3 +173,6 @@ class ActionGateway:
                 future.cancel()
             elif not future.cancelled():
                 future.exception()  # Retrieve a disconnect failure even if send itself failed.
+
+    async def _send_payload(self, payload):
+        await self._socket.send_json(payload)

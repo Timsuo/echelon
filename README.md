@@ -30,7 +30,7 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 
 `qq` `napcat` `onebot` `llm` `ai` `message-aggregation` `smart-inbox` `notification` `summarization` `automation`
 
-以上描述包含项目愿景；分类、优先级、标签已在 Phase 3 实现，自动投递仍未实现，具体以 Current Features 和 Roadmap 为准。
+分类、优先级、标签已在 Phase 3 实现；Phase 4 增加动态授权、自动投递与分层总结，具体以 Current Features 和 Roadmap 为准。
 
 ## Why Echelon
 
@@ -63,16 +63,24 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 - 断连/停机缺口持久化、重连有限回补、在线低频重叠核验、手动 `/sync`。
 - `ingest_source` 区分实时与历史；`/coverage` 展示保守覆盖状态，总结对未确认缺口添加 Python 生成的警告。
 - `/help` 分类首页及全部命令详情来自统一 CommandSpec，与路由共用注册信息。
-- 所有恢复均为 best effort，没有完整离线重放保证，未实现 Phase 4 紧急提醒。
+- 所有恢复均为 best effort，没有完整离线重放保证（紧急提醒见 Phase 4）。
 
-### Phase 3 — Intelligent Triage & Personal Preferences — Current
+### Phase 3 — Intelligent Triage & Personal Preferences — ✅ Implemented
 
 - inbox / priority 群的新消息持久排队，经 debounce 和有界批处理后交给 LLM 聚合成 0..10 个事项。
 - 固定分类、优先级与标签，行动要求、截止时间、简短判断依据；合并近期同群条目与已有文件条目。
 - `/prefs`、`/pref` → typed proposal → 共用 `/confirm`、`/cancel`，偏好按账号隔离。
 - 来源 ID、合并 ID、严格 Schema 与相对日期校验；结果和来源归属同事务应用。
-- Coverage 警告由 Python 决定，保留历史 event_time；revision 为 Phase 4 投递去重准备。
-- **分类结果仅进入 Inbox，不发送即时提醒，不实现 Heartbeat 或 Scheduled Digest。**
+- Coverage 警告由 Python 决定，保留历史 event_time；revision 用于 Phase 4 投递去重及更新提醒。
+- 分类结果进入 Inbox，后续由 Phase 4 按授权、Priority Watch 与投递偏好决定提醒。
+
+### Phase 4 — Dynamic Authorization & Delivery Automation — Current
+
+- `/allow add/remove` → 验证 / 提案 → `/confirm`，运行中动态授权；撤销保留历史，重启不重新导入。
+- Heartbeat、重要消息快速分类、HIGH / CRITICAL 提醒、静默延后、定时 / 手动收信与错过时间补发。
+- 持久 revision provenance、material fingerprint、投递记录、Digest 快照和 outbox producer 关联。
+- `/delivery`、`/notify`、`/digest now`；历史回补按原事件时间判断是否提醒，覆盖缺口由 Python 提示。
+- Phase 4C：话题真实讨论时间、有限历史总结上下文、Detailed / Compact、历史总结展开与统一图标。
 
 ## Architecture
 
@@ -152,7 +160,7 @@ inbox:
   default_page_size: 10
 ```
 
-确认 groups.allowed 中的群号符合自己的监听范围；配置修改后重启。配置路径始终相对于项目根目录，不依赖终端当前工作目录。
+`groups.allowed` 仅在账号首次升级绑定时导入一次；之后用 `/allow` 管理授权，修改此列表不会恢复已移除群。其他 YAML 配置修改后重启。配置路径始终相对于项目根目录，不依赖终端当前工作目录。
 默认模型可修改，当前名称参考 [DeepSeek JSON Output 文档](https://api-docs.deepseek.com/guides/json_mode/)。
 API 地址固定为 `https://api.deepseek.com`，不使用 OpenAI API Key。
 普通总结默认显式发送 `thinking.type=disabled`；设置 `deepseek.thinking: true` 后发送 `enabled`。
@@ -243,11 +251,11 @@ SQLite 位于 `data/messages.db`，自动初始化 WAL、NORMAL、foreign_keys �
 
 ## 安全边界与故障行为
 
-- `ActionGateway` 是唯一 WebSocket 写入 OneBot action 的位置。READ_ONLY_ACTIONS 仅含 `get_group_file_url` / `get_group_msg_history`，
+- `ActionGateway` 是唯一 WebSocket 写入 OneBot action 的位置。READ_ONLY_ACTIONS 仅含 `get_group_file_url` / `get_group_msg_history` / `get_group_info` / `get_group_list`，
   PRIVATE_OUTPUT_ACTIONS 仅含 `send_private_msg` / `upload_private_file`；任何其他 action 首先抛出 `PermissionError`。
   不开放当前不需要的目录查询、`download_file` 或任何群文件修改 API。
 - 私聊目的地必须等于 ADMIN_QQ。文字固定为 text segment，不解释 CQ 内容；文件调用只接受附件数据库 ID 与账号，
-  不接受任意路径。Gateway 从数据库重取文件，验证连接账号、白名单群、下载状态、存储根目录、确定性路径和 SHA-256 后才发送。
+  不接受任意路径。Gateway 从数据库重取文件，验证连接账号、数据库附件来源、下载状态、存储根目录、确定性路径和 SHA-256 后才发送；合法保存的旧附件不要求群今天仍 active。远端群文件及历史读取必须 active。
 - `/file` 只接受两个正整数，不能传入路径。文件名经清理并添加附件 ID 前缀，目录按 self_id/group_id 分隔。
   拒绝路径逃逸、符号链接、junction、reparse point、非普通文件和硬链接；附件目录须仅允许可信本机用户修改。
 - 群记录只读，不删除、撤回、禁言、踢人，也不自动处理好友或入群请求。
@@ -320,7 +328,7 @@ start.bat
 ## 开发验证
 
 ```powershell
-.\venv\Scripts\python.exe -m pytest -q
+.\venv\Scripts\python.exe -m pytest -q --basetemp .pytest_tmp/local
 .\venv\Scripts\python.exe -m ruff check app tests
 .\venv\Scripts\python.exe -m compileall -q app
 .\venv\Scripts\python.exe -m pip check
@@ -368,7 +376,7 @@ start.bat
 
 ## Group Policies
 
-`groups.allowed` 决定是否允许采集；GroupPolicy 只决定白名单内群的处理方式，不能扩大白名单。
+`group_authorizations` 是运行期采集授权来源；`groups.allowed` 只作首次绑定 seed。GroupPolicy 只决定已授权群的处理方式，不能扩大授权。
 策略以 `(self_id, group_id)` 隔离，未配置的白名单群使用 `summary_only`，不会突然生成 Inbox 或下载文件。
 
 | 模式 | 保存消息 / 总结 | Inbox 文件条目 | 附件自动下载 | Priority Watch |
@@ -385,7 +393,7 @@ summary_only 可只保存附件元数据并标记 skipped；ignore 在业务入�
 策略对后续事件和待执行任务生效，不删除旧数据、不追溯生成旧文件的 Inbox、不自动重排 skipped 下载。
 已开始的 API 请求或文件传输可能完成；下载 worker 在执行前重新检查策略。
 
-**Priority Watch policy is stored, but automatic urgent alerts are planned for Phase 4.**
+**Priority Watch 已接入 Phase 4：仅符合投递偏好的新 HIGH / CRITICAL 实质修订可以即时提醒。**
 priority 模式提高历史核验频率（默认2分钟），Phase 3 还缩短批量分类等待时间（默认60秒），但不发送即时提醒。
 自动 triage 要求 mode 为 inbox / priority 且 inbox_enabled=true；summary_only 和 ignore 不参与。
 
@@ -407,7 +415,7 @@ priority 模式提高历史核验频率（默认2分钟），Phase 3 还缩短�
 /config 这个群主要闲聊，只需要总结
 ```
 
-示例群号须先在 YAML 白名单内；别名须先配置。最后一个例子会要求明确群号。
+示例群号须先通过 bootstrap 或 `/allow add` 完成授权；别名须先配置。最后一个例子会要求明确群号。
 明确格式 `mode <profile>`、`alias <别名>`、`<开关字段> true/false` 直接本地解析；简单中文文件开关也可本地识别。
 其他自然语言后台调用 DeepSeek，沿用默认关闭 thinking、严格 JSON 校验和有限重试。缺少 API Key 不影响明确命令。
 Python 先从本账号白名单/别名唯一解析目标，LLM 输出中不允许 group_id、SQL、路径或 action 权限，不能凭空决定群号。
@@ -693,7 +701,7 @@ Python 额外核验今天、明天、后天、大后天、下周某日与引用�
 但由 Python 将 coverage_status 设为 warning，并在 `/inbox`、`/detail` 提示可能缺少上下文。
 合并既有 warning 条目时不会悄悄清除警告；本阶段不自动重新评估已存条目。
 无已知缺口使用 no_known_gap，**不表示绝对完整**；likely_covered 仍只是有限时间范围证据。
-历史消息保持 event_time 和 ingest_source，未来 Phase 4 必须按事件原时间及 revision 决定投递，不能把 received_time 当新事件时间。
+历史消息保持 event_time 和 ingest_source，Phase 4 按事件原时间及 revision 决定投递，不能把 received_time 当新事件时间。
 附件只提供 filename、file_size、download_status 和 source ID，不读 binary、路径、临时 URL 或文件内容。
 
 ## Phase 3 Manual Verification
@@ -703,12 +711,190 @@ Python 额外核验今天、明天、后天、大后天、下周某日与引用�
 3. `/config <课程群号> mode inbox`，确认提案；白名单不得由模型扩张。
 4. 群内连续发送“下周实验课改到302”“时间还是周四下午”“记得带实验报告”。
 5. 等待默认180秒静默期（持续发言最多等待600秒封批），再加模型处理时间；priority 对应60/180秒。
-6. `/inbox`、`/detail <id>`，检查合理聚合、category、priority、labels、action、deadline；应无自动紧急私聊。
+6. `/inbox`、`/detail <id>`，检查合理聚合、category、priority、labels、action、deadline；INBOX 默认不开 Priority Watch，因此不应自动紧急私聊。
 7. 上传课程文件并补一句用途说明，等分类后检查复用文件条目、来源与附件关联，`/file <id> 1` 仍可转发。
 8. 测试 `/inbox high`、`/inbox critical`、`/inbox deadline`、`/inbox action`。
 9. summary_only 群发相同普通消息，不应创建智能 Inbox；ignore 群不进入采集。
 10. 按 Phase 2.5 流程断连回补，确认旧消息的相对日期使用原 event_time，缺口条目有 coverage warning。
 11. 回归 `/summary 30m`、`/sync`、`/coverage`、GroupPolicy 提案和附件转发；测试服务重启后的 running 任务恢复。
+
+## Dynamic Group Authorization
+
+`config.groups.allowed` 是 bootstrap seed：只有通过合法 OneBot self_id 绑定后，才为该账号导入一次。
+数据库迁移阶段不猜测账号。之后 `group_authorizations(self_id, group_id)` 是唯一运行期授权来源。
+即使 YAML 仍包含旧群号，`/allow remove` 后重启也不会重新授权；首次 seed 为空也算完成 bootstrap。
+
+```text
+/allow
+/allow add 123456789
+/confirm <提案ID>
+/allow remove 123456789
+/confirm <提案ID>
+```
+
+添加前后台请求 `get_group_list(no_cache=true)` 证明机器人已加入，再用 `get_group_info` 获取真实群名。
+NapCat 的 [GetGroupInfo 实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/group/GetGroupInfo.ts)
+可能返回未加入群的公开资料，因此不能单靠成功返回群名授权。
+兼容处理集中于 `app/onebot/groups.py`，两个动作都只读，均校验连接和 self_id；不支持验证时拒绝添加。
+验证放在已有配置后台队列中，避免等待 API 响应时阻塞 WebSocket 接收循环。
+
+新群默认 SUMMARY_ONLY，不自动分类、下载或提醒。重新添加旧群会展示并恢复其现有策略和独立开关。
+`group_name` 是远端群名缓存，`GroupPolicy.alias` 是自定义别名；展示优先 alias → group_name → group_id。
+
+- **ignore**：群仍授权，暂停业务处理，可用 `/config` 恢复。
+- **remove**：撤销未来采集授权，停止事件入库、新历史读取、Triage、下载、总结和新的自动投递。
+- 待处理任务取消或明确失败；执行和最终落盘再验证授权。下载在提交最终文件前撤权会清理临时文件。
+- 消息、Inbox、已下载附件、总结和策略保留，`/detail`、`/file`、`/summary detail` 仍可使用。
+- 已写入 private_outbox 的文本保持原可靠性语义，不在发送中重写；撤销后不再生成新的投递。
+
+`/confirm`、`/cancel` 共用 ConfigurationProposalService，处理 group_policy、triage_preferences、
+group_authorization、delivery_preferences。账号、管理员、状态、10分钟过期及 Before 冲突统一检查；确认与变更同事务提交。
+配置请求新增 nullable target_group_id；旧 group_id 只作兼容存储，不承担全局配置的业务语义。
+
+## Delivery Automation
+
+Triage → Inbox material revision + provenance event → Delivery evaluation → 持久任务 → private_outbox → 原 notifier → ADMIN_QQ。
+投递不重新调用 LLM 分类。`delivery_start_at` 限制自动和手动收信窗口，不会扫描旧库批量发送历史 HIGH。
+默认启用投递；Priority Watch 默认仍由新群 SUMMARY_ONLY 关闭。
+
+`/delivery` 查看完整状态；`/status` 显示授权群数、Heartbeat 健康、下一次收信与延后数量。
+`/notify` 只产生偏好提案；数字 HH:MM 优先本地解析，其余自然语言经原 DeepSeek 严格 JSON 入口。
+每天收信时间去重、排序，最多12个；不能修改授权、群策略、个人分类偏好、路径或 arbitrary cron。
+
+```text
+/notify 每天7:30、12:20、18:00和22:30收信
+/notify 23:30到07:00不要提醒我
+/notify critical 即使静默时间也提醒
+/notify high 不要打破静默
+/notify 不要发送空摘要
+/confirm <提案ID>
+```
+
+## Heartbeat
+
+默认每60秒后台检查，**没有工作就不发消息**。仅评估新的 revision，并处理延后提醒、收信时间和补发。
+重要发送者、个人重要关键词及少量提示词只能加速待分类消息，不能直接发提醒。
+fast-track 最少保留30秒 debounce，连续修正消息可进入同一批；最终提醒仍依赖 Inbox.priority。
+
+## Urgent Alerts
+
+必须同时满足 active authorization、非 ignore、priority_watch_enabled、全局 urgent_enabled、
+配置的 HIGH / CRITICAL、未归档、Phase 4 后新 revision，以及未投递过相同 material fingerprint。
+开关独立于 mode，因此 INBOX 也可单独开启 Priority Watch。
+fingerprint 包含 priority、title、category、deadline_at、action_required、action_text；忽略 summary 小改、reason、confidence、时间戳和标点变化。
+优先级升级和截止等实质变化分别显示“优先级升级”或“事项更新”，同一事项 ID 保持不变。
+
+## Scheduled Digest
+
+默认 07:30、12:20、18:00、22:30（config.timezone），按 CRITICAL → HIGH → NORMAL → LOW 分组。
+只选当前 active、未归档、窗口内新建或实质修订的 Inbox；默认不含已读、不发空摘要。
+已提前提醒的事项在下一次 Digest 出现一次并标记，之后相同 revision 不重复；每次保存条目快照。
+
+`/digest now` 立即创建持久后台任务，不在命令路由同步整理。显式手动请求不受自动开关和静默时段限制，
+仍使用从 Phase 4 启用及上次成功收信后的 revision 窗口，不回溯整个旧库。
+错过计划时，默认180分钟内的多个时间点合并一次 catch-up；超时不补旧计划，尚未收信的新 revision 可进下次正常 Digest。
+静默期间积累的自动收信任务在静默结束后合并，避免一次发送多封。
+
+## Quiet Hours
+
+默认 23:30–07:00，支持跨午夜。HIGH 默认延后，CRITICAL 默认允许打破静默，两个开关均可配置。
+延后记录和到期时间持久保存。发送前重新验证授权、归档、priority、fingerprint、期限和行动有效性；不再符合就取消。
+静默不会丢掉仍有效的提醒；修改静默偏好后也会重新判断。
+
+## Recovery Alerts
+
+历史回补事项由 revision 对应的 triage job 和源消息确定，使用 **messages.event_time**，不是 received_time。
+默认12小时内、仍可行动的 HIGH / CRITICAL 可显示“离线期间回补提醒”，附原消息和分类时间。
+更旧消息只进入下一次 Digest；有明确未来 deadline 的有效事项例外。已过期 deadline 不即时提醒。
+当前没有独立 schedule_start 字段；仅“调课”分类、没有行动或可靠未来时间的历史事项保守进入 Digest。
+
+## Delivery Reliability
+
+投递记录、Digest 条目快照、outbox 各分块和 producer metadata 同事务提交。
+重启后根据所有分块 sent_at 对账，发送成功但 worker 尚未改状态时不会再次 enqueue；数据库唯一约束阻止重复 producer chunk。
+仍使用原 run_notifier，未增加第二个 QQ 发送通道。
+
+**这保证数据库内不重复排队，不等于 QQ 端到端 exactly-once。** QQ 已接收但 ACK 丢失，或成功 ACK 后、sent_at 落盘前崩溃，
+OneBot 没有幂等发送键，原 outbox 重试仍可能重复。这一协议边界没有被隐藏。
+Coverage 由 Python 查询缺口；partial / unknown / failed / pending / running 不阻止已知重要事项提醒，但明确显示警告。
+空摘要只说“当前已采集信息中没有识别到新的高优先级事项”，不会宣称绝对完整。
+**NapCat / QQ history API 仍不能视为100%可靠的离线事件重放机制。**
+
+## Hierarchical Summaries
+
+Raw Messages → Detailed SummaryData v2 → 永久保存 → Compact 默认显示视图。
+`summary_json` / `rendered_text` 始终保存完整 Detailed；`compact_json` / `compact_rendered_text` 另外保存。
+短于 compact_threshold_chars 的结果直接发送完整版本；长内容按结构压缩、按 importance 折叠话题，保留决定、待办、重要事件和不确定事项。
+不对完整 rendered_text 做硬截断。本阶段采用 deterministic compression，不增加第二次 LLM 调用；压缩失败用安全结构化 fallback，Detailed 不丢失，job 仍 completed。
+compact_target_chars 是软目标：重要行动字段本身很长时保留其全文，由原 outbox 分块，完整内容始终可展开。
+
+话题 start_message_id / end_message_id 必须来自当前输入；Python 使用真实 event_time 计算开始、结束与 duration，
+拒绝不存在的引用与倒置时间。模型不能提交任意 topic timestamp。跨日期显示日期，时区使用 config.timezone。
+continuation 只标记话题相关，本轮时间不扩张到前一天。
+
+可选 YAML（未写入你的现有 config 文件）：
+
+```yaml
+summary:
+  previous_summary_limit: 3
+  previous_summary_lookback_hours: 48
+  compact_threshold_chars: 1600
+  compact_target_chars: 1000
+  compact_max_topics: 5
+```
+
+## Summary Continuity
+
+只使用同 self_id、同 group_id、completed、window_end <= 当前 window_start、最近48小时最多3份的结构化总结。
+不输入旧 rendered_text。previous_summaries 标记为 untrusted_model_generated_context，只帮助理解简称、延续和修正。
+**Previous Summary 不是权威事实源，当前 Raw Messages 始终是主要事实来源。**
+模型不得仅据旧总结创造决定、待办或事件；冲突以当前消息为准。
+输入预算不足先移除最旧上下文，绝不截掉当前原始消息；原始窗口超限继续明确失败。
+当前窗口为空时不调用模型，也不会根据旧总结虚构本轮内容。
+这些约束不能保证模型理解完全正确，重要事项仍应核对原文。
+
+## Summary Commands
+
+| 命令 | 行为 |
+| --- | --- |
+| `/summary 30m` / `2h` / `today` | active + summary_enabled + 非 ignore 群创建新任务 |
+| `/summary list` | 当前账号最近10份历史总结，removed 群标“已停止接收” |
+| `/summary detail <id>` | 直接发送已保存完整文本，不调用模型 |
+| `/summary compact <id>` | 读取已保存压缩视图；旧 v1 总结在本地生成视图 |
+| `/summary topic <id> <序号>` | 单个话题的完整内容、讨论时间、参与者和引用 |
+
+所有查询按 self_id 隔离，知道其他账号 ID 也不能读取。旧 v1 detail 直接使用旧 rendered_text，无需重算。
+迁移增加 schema_version 默认1、compact_json、compact_rendered_text；新结果为 v2，旧资料保留。
+默认 Summary 群名 alias → group_name → group_id。撤权后仍可查看旧总结。
+
+## Summary Visual Language
+
+图标映射集中于 app/rendering/icons.py，Summary / Inbox / Digest / Alert 共用 category 和 priority 语义。
+模型只提供枚举，Python renderer 选择图标；模型正文中的 UI Emoji 会被过滤，事实原文仍留在 JSON。
+参与者≤5人全部显示，更多时显示前三人及总数；Compact 不显示昵称列表和参考 ID。
+HIGH 🟠、CRITICAL 🚨、NORMAL 🔵、LOW ⚪；schedule 📅、assignment 📋、material 📎、discussion 💬。
+文本标签本身保持可读，Emoji 只作辅助。
+Summary Detailed 和 Compact 均保留 Python coverage warning；LIKELY_COVERED 只表示已回查到对应时间范围，不表示“完整”。
+
+`digest_include_group_summaries` 默认 false，可通过 `/notify` 生成提案开启。
+启用时，每个 active summary_only 群最多一条概览，仅含最多两个话题标题、话题数量和 detail 链接，不复制整份 Compact 或 Detailed。
+
+## Phase 4 / 4C Manual Verification
+
+自动测试使用模拟 OneBot / DeepSeek 与临时数据库；真实 QQ 展示和目标 NapCat 版本仍需现场验收。
+实施细节与 555 项全量测试结果见 [Phase 4 报告](PHASE4_REPORT.md) 和 [Phase 4C 报告](PHASE4C_REPORT.md)。
+
+1. 正常停服并备份 data 后启动，`/allow` 检查一次性导入，`/delivery` 检查时区及默认设置。
+2. `/allow add <已加入测试群>`，确认前消息不入库；核对 SUMMARY_ONLY 提案后 `/confirm`。
+3. 群内发送测试消息，确认开始采集；`/config <群号> mode priority`，确认后测试普通消息不紧急提醒。
+4. 连续发送重要事项及修正，等待 debounce + triage + heartbeat，验证只提醒一次；修改 deadline 验证事项更新。
+5. `/notify` 设置静默与收信时间，确认后测试 HIGH 延后、CRITICAL override；重启后延后提醒仍保留。
+6. `/digest now` 验证分组、已提前提醒标记、相同 revision 不重复；断线错过多个收信时间后应合并补发。
+7. 断开 NapCat，测试群离线期间发重要内容，恢复后检查原 event_time、回补标签及 coverage warning。
+8. `/summary 2h` 检查话题时间；长总结默认 Compact，`detail` / `compact` / `topic` 不重新调用模型。
+9. 后续窗口总结可参考旧话题，但无当前新消息时不能复述旧事实为新讨论。
+10. `/allow remove` 确认后新消息、历史读取、分类、下载及新提醒停止；旧 Inbox、附件和总结可查看。
+11. 重启，确认 YAML 中仍有的已移除群没有自动恢复；重新添加时显示将恢复的原策略。
 
 ## Roadmap
 
@@ -717,8 +903,8 @@ Python 额外核验今天、明天、后天、大后天、下周某日与引用�
 | Phase 1 — Message Collection & Summary | ✅ Implemented | 消息采集、持久化、私聊总结 |
 | Phase 2 — Attachments & Inbox Foundation | ✅ Implemented | 附件、Inbox、管理员文件转发、Group Policy、Conversational Configuration |
 | Phase 2.5 — Reliability / History Recovery / Command UX | ✅ Implemented | 缺口检测、有限历史回补、周期核验、覆盖警告、统一帮助 |
-| Phase 3 — Intelligent Triage & Personal Preferences | Current | 消息聚合、categories、priorities、labels、deadline、personal preferences |
-| Phase 4 — Delivery Automation | Planned | heartbeat、urgent alert、scheduled digest、quiet hours |
+| Phase 3 — Intelligent Triage & Personal Preferences | ✅ Implemented | 消息聚合、categories、priorities、labels、deadline、personal preferences |
+| Phase 4 — Dynamic Authorization & Delivery Automation | Current | 动态授权、heartbeat、urgent/recovery alert、digest、quiet hours、分层总结 |
 | Phase 5 — Web Inbox | Planned | browser UI、search、filtering、archive、attachment management |
 
 以下仍未实现：

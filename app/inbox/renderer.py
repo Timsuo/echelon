@@ -1,6 +1,8 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.rendering.icons import CATEGORY_ICON, PRIORITY_ICON, plain
+
 
 def timestamp(value: int | None, timezone: str) -> str:
     return datetime.fromtimestamp(value, ZoneInfo(timezone)).strftime("%Y-%m-%d %H:%M") if value else "未知"
@@ -9,10 +11,10 @@ def timestamp(value: int | None, timezone: str) -> str:
 def render_inbox(items: list[dict], unread: int, timezone: str) -> str:
     lines = ["【Echelon Inbox】", f"未读：{unread}"]
     for item in items:
-        lines.extend(["", f"#{item['id']} [{item['status'].upper()}]", item["title"],
+        lines.extend(["", f"#{item['id']} [{item['status'].upper()}]", plain(item["title"]),
                       f"群：{item['source_group_id'] or '未知'}", f"时间：{timestamp(item['event_time'], timezone)}"])
         if item.get('priority'):
-            lines.append(f"{item['priority'].upper()} · {(item.get('category') or '未分类').upper()}")
+            lines.append(f"{PRIORITY_ICON.get(item['priority'], '')} {item['priority'].upper()} · {CATEGORY_ICON.get(item.get('category'), '💬')} {(item.get('category') or '未分类').upper()}")
         if item.get('coverage_status') == 'warning':
             lines.append('⚠ 存在未确认采集缺口')
     if not items:
@@ -22,11 +24,12 @@ def render_inbox(items: list[dict], unread: int, timezone: str) -> str:
 
 
 def render_detail(item: dict, timezone: str) -> str:
+    item = item | {key: plain(item[key]) for key in ('title', 'summary', 'action_text', 'reason', 'deadline_text') if item.get(key)}
     lines = [f"【Echelon #{item['id']}】", f"标题：{item['title']}", f"状态：{item['status'].upper()}",
              f"来源群：{item['source_group_id'] or '未知'}", f"时间：{timestamp(item['event_time'], timezone)}",
              "", "内容：", item["summary"] or "暂无摘要", f"来源消息：{item['message_count']} 条", "", "附件："]
-    facts = [f"优先级：{(item.get('priority') or '未分类').upper()}",
-             f"分类：{(item.get('category') or '未分类').upper()}",
+    facts = [f"优先级：{PRIORITY_ICON.get(item.get('priority'), '')} {(item.get('priority') or '未分类').upper()}",
+             f"分类：{CATEGORY_ICON.get(item.get('category'), '💬')} {(item.get('category') or '未分类').upper()}",
              '标签：' + (' '.join('#' + label for label in item.get('labels', [])) or '无'),
              '截止：' + (timestamp(item['deadline_at'], timezone) if item.get('deadline_at') else item.get('deadline_text') or '未明确'),
              '需要行动：' + (item.get('action_text') or '否'),

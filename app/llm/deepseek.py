@@ -50,6 +50,11 @@ class DeepSeekClient:
     async def parse_preferences(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> PreferenceIntent:
         return await self._generate(text, PREFERENCE_PROMPT, PreferenceIntent, on_retry)
 
+    async def parse_delivery_preferences(self, text: str, on_retry):
+        from app.delivery.models import DeliveryPreferenceIntent
+        from app.delivery.preferences import DELIVERY_PROMPT
+        return await self._generate(text, DELIVERY_PROMPT, DeliveryPreferenceIntent, on_retry)
+
     async def triage(self, text: str) -> TriageResult:
         # Persistent job owns the retry budget; do not multiply it by SDK/output retries.
         async def no_retry() -> None:

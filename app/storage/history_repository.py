@@ -3,6 +3,7 @@ import time
 
 from app.config import AppConfig
 from app.history.renderer import recovery_report
+from app.storage.authorization_repository import active_ids, is_active
 from app.storage.policy_repository import read_policy
 from app.storage.repository import Repository
 
@@ -73,6 +74,8 @@ class HistoryRepository:
 
     async def _enqueue(self, connection, self_id: int, group_id: int, mode: str,
                        start: float, end: float, now: float, gap_id: int | None = None) -> int | None:
+        if not await is_active(connection, self_id, group_id):
+            return None
         result = await rows(connection, "INSERT INTO history_sync_jobs(self_id,group_id,gap_id,mode,window_start,window_end,next_attempt,created_at) "
             "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING RETURNING id",
             (self_id, group_id, gap_id, mode, start, end, now + self.config.history.debounce_seconds if gap_id else now, now))
@@ -94,7 +97,7 @@ class HistoryRepository:
             await state(connection, "last_collection_checkpoint", str(now))
             gaps = await rows(connection, "UPDATE collection_gaps SET ended_at=?,updated_at=?,report_after=? "
                 "WHERE self_id=? AND ended_at IS NULL RETURNING *", (now, now, now + self.config.history.debounce_seconds, self_id))
-            for group_id in self.config.groups.allowed:
+            for group_id in await active_ids(connection, self_id):
                 await connection.execute("INSERT INTO history_sync_state(self_id,group_id,last_scheduled_at) VALUES (?,?,?) "
                                          "ON CONFLICT DO NOTHING", (self_id, group_id, now))
                 policy = await read_policy(connection, self_id, group_id)
@@ -110,15 +113,15 @@ class HistoryRepository:
     async def manual(self, self_id: int, group_id: int | None = None) -> list[int]:
         if not self.config.history.enabled:
             raise ValueError("历史核验已关闭，请检查 history.enabled")
-        groups = self.config.groups.allowed if group_id is None else [group_id]
-        if any(group not in self.config.groups.allowed for group in groups):
-            raise ValueError("该群不在采集白名单中")
         now, ids = time.time(), []
         async with self.db.transaction() as connection:
             bound = await rows(connection, "SELECT value FROM runtime_state WHERE key='onebot_self_id'")
             if not bound or bound[0]["value"] != str(self_id):
                 raise ValueError("当前机器人账号不匹配")
+            groups = await active_ids(connection, self_id) if group_id is None else [group_id]
             for group in groups:
+                if not await is_active(connection, self_id, group):
+                    raise ValueError("该群当前未授权采集。")
                 policy = await read_policy(connection, self_id, group)
                 if policy.mode == "ignore":
                     continue
@@ -136,7 +139,7 @@ class HistoryRepository:
             await state(connection, "last_collection_checkpoint", str(now))
             if not self.config.history.enabled or not self.config.history.periodic_enabled:
                 return
-            for group in self.config.groups.allowed:
+            for group in await active_ids(connection, self_id):
                 policy = await read_policy(connection, self_id, group)
                 interval = self.config.history.interval(policy.mode)
                 if interval is None:
@@ -153,11 +156,13 @@ class HistoryRepository:
         now = time.time()
         records = await self.repository.query("UPDATE history_sync_jobs SET status='running',attempts=attempts+1,started_at=? "
             "WHERE id=(SELECT id FROM history_sync_jobs WHERE self_id=? AND status='queued' AND next_attempt<=? "
+            "AND EXISTS (SELECT 1 FROM group_authorizations a WHERE a.self_id=history_sync_jobs.self_id AND a.group_id=history_sync_jobs.group_id AND a.active=1) "
             "ORDER BY CASE mode WHEN 'reconnect' THEN 0 WHEN 'manual' THEN 1 ELSE 2 END,id LIMIT 1) AND status='queued' RETURNING *",
             (now, self_id, now))
         return records[0] if records else None
 
-    async def _aggregate(self, connection, gap_id: int, now: float) -> None:
+    @staticmethod
+    async def _aggregate(connection, gap_id: int, now: float) -> None:
         jobs = await rows(connection, "SELECT status,coverage FROM history_sync_jobs WHERE gap_id=?", (gap_id,))
         if any(j["status"] in {"queued", "running"} for j in jobs):
             coverage = "running"
@@ -174,6 +179,11 @@ class HistoryRepository:
         now = time.time()
         status = "queued" if retry else ("failed" if error else "completed")
         async with self.db.transaction() as connection:
+            current = await rows(connection, 'SELECT status,attempts FROM history_sync_jobs WHERE id=? AND self_id=?', (job['id'], job['self_id']))
+            if not current or current[0]['status'] != 'running' or current[0]['attempts'] != job['attempts']:
+                return
+            if not await is_active(connection, job["self_id"], job["group_id"]):
+                retry, status, coverage, error = False, "failed", "failed", "authorization_removed"
             await connection.execute("UPDATE history_sync_jobs SET status=?,coverage=?,error=?,next_attempt=?,completed_at=?,"
                 "messages_received=messages_received+?,messages_inserted=messages_inserted+?,invalid_messages=invalid_messages+?,"
                 "oldest_message_time=?,newest_message_time=? WHERE id=? AND self_id=?",
@@ -206,7 +216,12 @@ class HistoryRepository:
 
     async def unresolved(self, self_id: int, group_id: int, start: float, end: float) -> list[dict]:
         # Shared boundary for summaries and future Inbox/triage coverage checks; no LLM involvement.
-        return await self.repository.query("SELECT g.*,COALESCE(j.coverage,'unknown') AS coverage FROM collection_gaps g "
+        async with self.db.transaction() as connection:
+            return await self.unresolved_on(connection, self_id, group_id, start, end)
+
+    @staticmethod
+    async def unresolved_on(connection, self_id, group_id, start, end):
+        return await rows(connection, "SELECT g.*,COALESCE(j.coverage,'unknown') AS coverage FROM collection_gaps g "
             "LEFT JOIN history_sync_jobs j ON j.gap_id=g.id AND j.self_id=g.self_id AND j.group_id=? "
             "WHERE g.self_id=? AND g.started_at<? AND COALESCE(g.ended_at,?)>? "
             "AND (j.coverage IS NULL OR j.coverage!='likely_covered' OR j.status!='completed') ORDER BY g.started_at",
