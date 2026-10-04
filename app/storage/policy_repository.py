@@ -2,7 +2,9 @@ import json
 import logging
 import time
 
-from app.policies.models import POLICY_FIELDS, ConfigIntent, GroupPolicy
+from app.policies.errors import MESSAGES, ConfigErrorCode, ConfigParseError
+from app.policies.models import POLICY_FIELDS, ConfigFeedback, ConfigIntent, GroupPolicy
+from app.policies.parser import ConfigIntentParser
 from app.storage.authorization_repository import active_ids, is_active
 from app.storage.db import Database
 from app.storage.repository import Repository
@@ -54,7 +56,7 @@ class PolicyRepository:
             async with self.db.transaction() as connection:
                 return await self.check_group(self_id, group_id, connection)
         if not await is_active(connection, self_id, group_id):
-            raise ValueError("该群当前未授权采集。请先 /allow add <群号> 并确认。")
+            raise ConfigParseError(ConfigErrorCode.UNAUTHORIZED_GROUP, group_id=group_id)
 
     async def get(self, self_id: int, group_id: int) -> GroupPolicy:
         async with self.db.transaction() as connection:
@@ -102,20 +104,55 @@ class PolicyRepository:
         from app.policies.proposals import ConfigurationProposalService
         return await ConfigurationProposalService(self).resolve(self_id, admin_qq, identifier, confirm, message_id)
 
-    async def queue(self, self_id: int, admin_qq: int, group_id: int, message_id: str, text: str) -> None:
+    async def queue(self, self_id: int, admin_qq: int, group_id: int, message_id: str, text: str,
+                    *, body_only: bool = False) -> None:
         async with self.db.transaction() as connection:
             await self._account(connection, self_id)
             if await request_exists(connection, self_id, message_id):
                 return
             await self.check_group(self_id, group_id, connection)
+            if not body_only:
+                # Compatibility for internal callers still passing full /config arguments.
+                current = await read_policy(connection, self_id, group_id)
+                _, text = ConfigIntentParser.parse_target_and_body(text, [current])
             async with connection.execute("SELECT count(*) FROM configuration_requests WHERE status IN ('queued','running')") as cursor:
                 if (await cursor.fetchone())[0] >= 20:
                     raise ValueError("配置解析队列已满，请稍后再试")
-            inserted = await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,target_group_id) "
-                "VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING", (self_id, admin_qq, group_id, message_id, text, time.time(), group_id))
+            inserted = await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,target_group_id,intent_text) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING", (self_id, admin_qq, group_id, message_id, text, time.time(), group_id, text))
             if inserted.rowcount == 0:
                 return
-            await enqueue_text(connection, "正在解析配置意图；完成后将发送提案，确认前不会修改配置。", self_id)
+            await enqueue_text(connection, "正在解析配置意图；完成后将发送提案或澄清提示，确认前不会修改配置。", self_id)
+
+    async def config_body(self, request: dict) -> str | None:
+        async with self.db.transaction() as connection:
+            await self._account(connection, request['self_id'])
+            if not await request_running(connection, request['self_id'], request['admin_qq'], 'group_policy', request['id']):
+                return None
+            await self.check_group(request['self_id'], request['target_group_id'], connection)
+            if request.get('intent_text') is not None:
+                return request['intent_text']
+            current = await read_policy(connection, request['self_id'], request['target_group_id'])
+            # Legacy requests may use an alias that has since changed. Fail safely and ask
+            # for a new explicit command rather than selecting a different target.
+            _, body = ConfigIntentParser.parse_target_and_body(request['input_text'], [current])
+            await connection.execute('UPDATE configuration_requests SET intent_text=? WHERE id=?', (body, request['id']))
+            return body
+
+    async def complete_feedback(self, request: dict, feedback: ConfigFeedback) -> None:
+        async with self.db.transaction() as connection:
+            await self._account(connection, request['self_id'])
+            if not await request_running(connection, request['self_id'], request['admin_qq'], 'group_policy', request['id']):
+                return
+            await self.check_group(request['self_id'], request['target_group_id'], connection)
+            # Never echo model prose: it can contain injected instructions or secrets.
+            text = (MESSAGES[ConfigErrorCode.UNSUPPORTED_CONFIG] if feedback.action == 'unsupported' else
+                    '配置意图还不明确。你希望只总结、加入收件箱，还是重点关注？'
+                    '也可说明单项开关，例如“不要自动下载附件”。请重新发送 /config <群号> <明确设置>。')
+            await enqueue_text(connection, text, request['self_id'])
+            await connection.execute("UPDATE configuration_requests SET status='completed',error=NULL "
+                                     "WHERE id=? AND self_id=? AND admin_qq=? AND kind='group_policy' AND status='running'",
+                                     (request['id'], request['self_id'], request['admin_qq']))
 
     async def recover(self) -> None:
         async with self.db.transaction() as connection:

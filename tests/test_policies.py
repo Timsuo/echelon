@@ -97,8 +97,8 @@ async def test_policy_self_id_isolation(repository, policies):
 
 def test_duplicate_alias_requires_clarification():
     rows = [GroupPolicy(self_id=88, group_id=i, alias="课程群") for i in (123, 456)]
-    with pytest.raises(ValueError, match=r"123.*课程群[\s\S]*456"):
-        ConfigIntentParser.target("把课程群设置为 priority", rows)
+    with pytest.raises(ValueError, match="无法唯一确定目标群"):
+        ConfigIntentParser.target("课程群设置为 priority", rows)
     assert ConfigIntentParser.target("123 mode priority", rows) == 123
 
 
@@ -233,10 +233,9 @@ async def test_natural_file_toggle_is_local_minimal_change(processor, repository
     assert (await policies.get(88, 123)).model_dump() == before.model_dump() | {"attachment_download_enabled": False}
 
 
-def test_model_cannot_add_unrequested_fields():
+def test_model_valid_fields_do_not_require_fixed_cues():
     for changes in ({"mode": "summary_only"}, {"priority_watch_enabled": False}, {"alias": "new"}):
-        with pytest.raises(ValueError):
-            ConfigIntentParser.validate_intent(intent(**changes), "高数群不要自动下载文件")
+        ConfigIntentParser.validate_intent(intent(**changes), "由用户通过 diff 确认语义")
 
 
 async def test_config_llm_strict_schema_and_no_invented_group():

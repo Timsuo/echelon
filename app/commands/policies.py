@@ -1,6 +1,4 @@
 
-from pydantic import ValidationError
-
 from app.onebot.adapter import MessageEvent
 from app.policies.models import GroupPolicy
 from app.policies.parser import ConfigIntentParser
@@ -49,16 +47,12 @@ class PolicyCommands:
         if not argument or len(argument) > 2000:
             raise ValueError("用法：/config <群号或别名> <配置意图>（最多2000字）")
         policies = await self.policies.listing(event.self_id)
-        group_id = ConfigIntentParser.target(argument, policies)
-        current = next(policy for policy in policies if policy.group_id == group_id)
-        try:
-            intent = ConfigIntentParser.local(argument, group_id, current.alias)
-        except ValidationError as error:
-            raise ValueError("配置字段格式不合法") from error
+        group_id, body = ConfigIntentParser.parse_target_and_body(argument, policies)
+        intent = ConfigIntentParser.local(body)
         if intent:
             await self.policies.propose(event.self_id, self.admin_qq, group_id, intent, message_id=event.message_id)
         else:
-            await self.policies.queue(event.self_id, self.admin_qq, group_id, event.message_id, argument)
+            await self.policies.queue(event.self_id, self.admin_qq, group_id, event.message_id, body, body_only=True)
 
     async def confirm(self, event: MessageEvent, argument: str) -> None:
         await self.finish(event, argument, True)

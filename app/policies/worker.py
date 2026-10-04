@@ -1,8 +1,10 @@
 import asyncio
 import logging
 
-from app.llm.deepseek import DeepSeekClient, SummaryError
+from app.llm.deepseek import DeepSeekClient, InvalidModelSchemaError, SummaryError
 from app.operations.health import beat
+from app.policies.errors import ConfigErrorCode, ConfigParseError
+from app.policies.models import ConfigFeedback
 from app.policies.parser import ConfigIntentParser
 from app.storage.policy_repository import PolicyRepository
 from app.storage.preference_repository import PreferenceRepository
@@ -31,14 +33,25 @@ class ConfigurationWorker:
                 intent = await self.llm.parse_preferences(request['input_text'], lambda: self.repository.retry(request['id']))
                 await PreferenceRepository(self.repository).propose(request, intent)
                 return
-            await self.repository.check_group(request["self_id"], request["target_group_id"])
-            intent = await self.llm.parse_config(request["input_text"], lambda: self.repository.retry(request["id"]))
-            ConfigIntentParser.validate_intent(intent, request["input_text"])
+            body = await self.repository.config_body(request)
+            if body is None:
+                return
+            intent = await self.llm.parse_config(body, lambda: self.repository.retry(request["id"]))
+            ConfigIntentParser.validate_intent(intent)
+            if isinstance(intent, ConfigFeedback):
+                await self.repository.complete_feedback(request, intent)
+                return
             await self.repository.propose(request["self_id"], request["admin_qq"], request["target_group_id"], intent, request["id"])
         except Exception as error:
             # Never echo raw model/user input or validation internals to logs/outbox.
-            safe = str(error) if isinstance(error, SummaryError) else type(error).__name__
-            logger.warning("Configuration parsing failed id=%s kind=%s", request["id"], type(error).__name__)
+            if request.get('kind', 'group_policy') == 'group_policy':
+                code = (error.code if isinstance(error, ConfigParseError) else
+                        error.config_code if isinstance(error, InvalidModelSchemaError) else ConfigErrorCode.PROVIDER_ERROR)
+                safe = f"[{code.value}] {ConfigParseError(code)}"
+                logger.warning("Configuration parsing failed id=%s code=%s kind=%s", request["id"], code.value, type(error).__name__)
+            else:
+                safe = str(error) if isinstance(error, SummaryError) else type(error).__name__
+                logger.warning("Configuration parsing failed id=%s kind=%s", request["id"], type(error).__name__)
             await self.repository.failed(request, safe)
 
     async def run(self) -> None:

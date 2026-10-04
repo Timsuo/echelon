@@ -83,7 +83,7 @@ def test_relative_deadline_uses_history_event_time_and_timezone():
     assert 'event_time' in TRIAGE_PROMPT and '无工具权限' in TRIAGE_PROMPT
 
 
-@pytest.mark.parametrize('method,schema', [('summarize', 'SummaryData'), ('parse_config', 'ConfigIntent'),
+@pytest.mark.parametrize('method,schema', [('summarize', 'SummaryData'), ('parse_config', 'ConfigParseResult'),
     ('parse_preferences', 'PreferenceIntent'), ('triage', 'TriageResult')])
 @pytest.mark.parametrize('raw', ['private-chat-secret INVALID', '{"secret":"personal-preference-secret"}'])
 async def test_all_llm_schemas_never_log_raw_output(method, schema, raw, caplog):

@@ -1,6 +1,6 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 Mode = Literal["summary_only", "inbox", "priority", "ignore"]
 PROFILES = {
@@ -47,6 +47,17 @@ class ConfigIntent(BaseModel):
     action: Literal["update_group_policy"]
     changes: PolicyChanges
     reason: str = Field(min_length=1, max_length=300)
+
+
+class ConfigFeedback(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["clarify", "unsupported"]
+    # Never relay this untrusted text; the application renders safe guidance.
+    message: str = Field(min_length=1, max_length=300)
+
+
+class ConfigParseResult(RootModel[Annotated[ConfigIntent | ConfigFeedback, Field(discriminator="action")]]):
+    """Flat JSON wire format; existing update intents remain compatible."""
 
 
 class GroupPolicy(BaseModel):

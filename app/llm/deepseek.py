@@ -8,7 +8,8 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 from app.config import DeepSeekConfig
 from app.llm.prompts import SYSTEM_PROMPT
 from app.llm.schemas import SummaryData
-from app.policies.models import ConfigIntent
+from app.policies.errors import ConfigErrorCode
+from app.policies.models import ConfigFeedback, ConfigIntent, ConfigParseResult
 from app.policies.parser import SYSTEM_PROMPT as CONFIG_PROMPT
 from app.triage.models import PreferenceIntent, TriageResult
 from app.triage.prompts import PREFERENCE_PROMPT, TRIAGE_PROMPT
@@ -29,6 +30,14 @@ class NonRetryableModelOutputError(SummaryError):
     """Repeating the identical request is not expected to fix this output."""
 
 
+class InvalidModelSchemaError(RetryableModelOutputError):
+    def __init__(self, error: ValidationError):
+        self.config_code = (ConfigErrorCode.UNSAFE_MODEL_FIELDS
+                            if any(item["type"] == "extra_forbidden" for item in error.errors())
+                            else ConfigErrorCode.INVALID_MODEL_SCHEMA)
+        super().__init__("模型返回 JSON 不合法或不符合 Schema")
+
+
 def retryable(error: BaseException) -> bool:
     return isinstance(error, (APIConnectionError, RetryableModelOutputError)) or (
         isinstance(error, APIStatusError) and
@@ -44,8 +53,8 @@ class DeepSeekClient:
     async def summarize(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> SummaryData:
         return await self._generate(text, SYSTEM_PROMPT, SummaryData, on_retry)
 
-    async def parse_config(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> ConfigIntent:
-        return await self._generate(text, CONFIG_PROMPT, ConfigIntent, on_retry)
+    async def parse_config(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> ConfigIntent | ConfigFeedback:
+        return (await self._generate(text, CONFIG_PROMPT, ConfigParseResult, on_retry)).root
 
     async def parse_preferences(self, text: str, on_retry: Callable[[], Awaitable[None]]) -> PreferenceIntent:
         return await self._generate(text, PREFERENCE_PROMPT, PreferenceIntent, on_retry)
@@ -105,7 +114,7 @@ class DeepSeekClient:
                     except ValidationError as error:
                         logger.error("DeepSeek schema validation failed schema=%s response_length=%s "
                                      "finish_reason=stop error_class=%s", schema.__name__, len(raw), type(error).__name__)
-                        raise RetryableModelOutputError("模型返回 JSON 不合法或不符合 Schema") from error
+                        raise InvalidModelSchemaError(error) from error
                     logger.info("DeepSeek API request succeeded")
                     return result
         except SummaryError as error:

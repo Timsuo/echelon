@@ -11,6 +11,7 @@ from app.operations.health import WorkerHealth
 from app.storage.delivery_schema import migrate_delivery
 from app.storage.migrations import migrate_history, migrate_phase2, migrate_self_id
 from app.storage.operational_schema import migrate_operational
+from app.storage.policy_schema import migrate_config_parser
 from app.storage.schema import SCHEMA
 from app.storage.triage_schema import migrate_triage
 
@@ -42,6 +43,7 @@ class Database:
             await migrate_triage(connection)
             await migrate_delivery(connection)
             await migrate_operational(connection)
+            await migrate_config_parser(connection)
         logger.info("DB initialized")
 
     @asynccontextmanager

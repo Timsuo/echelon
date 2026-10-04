@@ -19,3 +19,11 @@ STATEMENTS = (
         created_at REAL NOT NULL, error TEXT, UNIQUE(self_id,message_id)
     )""",
 )
+
+
+async def migrate_config_parser(connection) -> None:
+    # NULL marks legacy full input; never guess whether a new body's first number is a target.
+    async with connection.execute("PRAGMA table_info(configuration_requests)") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+    if "intent_text" not in columns:
+        await connection.execute("ALTER TABLE configuration_requests ADD COLUMN intent_text TEXT")
