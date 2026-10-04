@@ -113,6 +113,18 @@ class SummaryConfig(StrictConfig):
         return self
 
 
+class OutboxConfig(StrictConfig):
+    retry_base_seconds: int = Field(default=2, ge=1, le=300)
+    retry_max_seconds: int = Field(default=300, ge=1, le=3600)
+    terminal_retry_limit: int = Field(default=3, ge=1, le=10)
+
+    @model_validator(mode='after')
+    def retry_bounds(self):
+        if self.retry_base_seconds > self.retry_max_seconds:
+            raise ValueError('outbox retry max must be >= base')
+        return self
+
+
 class AppConfig(StrictConfig):
     groups: Groups = Field(default_factory=Groups)
     timezone: str = "Asia/Shanghai"
@@ -124,6 +136,7 @@ class AppConfig(StrictConfig):
     history: HistoryConfig = Field(default_factory=HistoryConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
+    outbox: OutboxConfig = Field(default_factory=OutboxConfig)
 
     @field_validator("timezone")
     @classmethod

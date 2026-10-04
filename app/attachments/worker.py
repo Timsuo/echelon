@@ -11,6 +11,7 @@ import httpx
 from app.attachments.storage import AttachmentStorage
 from app.config import AttachmentConfig
 from app.onebot.files import FileResolver, validate_download_target
+from app.operations.health import beat
 from app.storage.authorization_repository import GroupAuthorizationRepository, active_version
 from app.storage.inbox_repository import InboxRepository
 from app.storage.policy_repository import PolicyRepository
@@ -132,6 +133,7 @@ class AttachmentWorker:
             try:
                 actions = self.resolver.actions
                 if not self.config.enabled or not actions.connected or actions.self_id is None:
+                    await beat(self.repository.db, 'attachment')
                     await asyncio.sleep(1)
                     continue
                 attachment = await self.repository.claim_attachment(actions.self_id)
@@ -139,6 +141,7 @@ class AttachmentWorker:
                     await self.process(attachment)
                 else:
                     await asyncio.sleep(1)
+                await beat(self.repository.db, 'attachment')
             except asyncio.CancelledError:
                 logger.info("Attachment worker stopped; interrupted downloads resume after restart")
                 raise

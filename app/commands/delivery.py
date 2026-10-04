@@ -42,7 +42,7 @@ class DeliveryCommands(PolicyCommands):
         try:
             intent = parse_local(argument)
             if intent:
-                await self.preferences.propose(dict(self_id=event.self_id, admin_qq=self.admin_qq), intent)
+                await self.preferences.propose(dict(self_id=event.self_id, admin_qq=self.admin_qq), intent, message_id=event.message_id)
             else:
                 await self.preferences.queue(event, argument)
         except ValidationError:

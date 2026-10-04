@@ -74,13 +74,20 @@ An intelligent inbox for QQ group chats that collects messages, notices and file
 - Coverage 警告由 Python 决定，保留历史 event_time；revision 用于 Phase 4 投递去重及更新提醒。
 - 分类结果进入 Inbox，后续由 Phase 4 按授权、Priority Watch 与投递偏好决定提醒。
 
-### Phase 4 — Dynamic Authorization & Delivery Automation — Current
+### Phase 4 — Dynamic Authorization & Delivery Automation — Implemented
 
 - `/allow add/remove` → 验证 / 提案 → `/confirm`，运行中动态授权；撤销保留历史，重启不重新导入。
 - Heartbeat、重要消息快速分类、HIGH / CRITICAL 提醒、静默延后、定时 / 手动收信与错过时间补发。
 - 持久 revision provenance、material fingerprint、投递记录、Digest 快照和 outbox producer 关联。
 - `/delivery`、`/notify`、`/digest now`；历史回补按原事件时间判断是否提醒，覆盖缺口由 Python 提示。
 - Phase 4C：话题真实讨论时间、有限历史总结上下文、Detailed / Compact、历史总结展开与统一图标。
+
+### Phase 4.5 — Operational Hardening & Production Readiness — Current
+
+- Outbox 优先级、消息内分块顺序、等待时间 aging、有限 terminal retry 与持久 dead-letter。
+- 配置请求／提案原子提交、重复私聊命令去重、总结失败账号与空队列提示修复。
+- `/doctor`、`/outbox`、worker 心跳、低频到期调度、无损迁移与 Windows CI。
+- 代码加固完成不等于生产验收完成；真实 NapCat / QQ 与 24–72 小时持续运行仍需验证。
 
 ## Architecture
 
@@ -273,7 +280,7 @@ SQLite 位于 `data/messages.db`，自动初始化 WAL、NORMAL、foreign_keys �
   summaries 同时保存该 self_id；即使排队后切换账号，也不会混合不同账号的消息。
 - 总结、completed 状态和待发通知在同一事务保存；QQ 断开后通知保留，重连自动继续发送。completed 表示结果已保存，不等于已经送达。
 - 私聊必须收到 echo 对应的成功响应才标记送达。若 QQ 已送达但确认丢失，重试可能导致重复私聊，无法实现端到端 exactly-once；消息带任务编号便于识别。
-- 通知按顺序发送；管理员私聊不可达可能阻塞后续通知，`/status` 的回复也会排队。请检查 `send_private_msg failed` 日志和 ADMIN_QQ / 好友关系。
+- 通知按 Outbox QoS 调度，未到重试时间的行不阻塞其他 ready producer；`/status` 的回复也会排队。请检查 `send_private_msg failed` 日志和 ADMIN_QQ / 好友关系。
 - 断线和停机窗口会触发有限历史回补；OneBot 推送没有本项目可依赖的持久重放保证。磁盘满或数据库不可写会记错误并断开连接，**无法保证尚未落盘的事件可恢复**。
 - WAL + synchronous=NORMAL 适合长期运行，但突然断电仍可能丢失最近提交；重要数据应定期备份。停服后复制整个 data 目录最简单，运行中用 SQLite backup API，不要只复制 messages.db 而忽略 WAL。
 - SQLite 和通知历史不自动清理；持续运行应监测磁盘容量。日志已轮转。
@@ -317,7 +324,7 @@ requirements.txt, requirements.lock.txt, pyproject.toml
 start.bat
 ```
 
-数据库包含 messages、summary_jobs、summaries、runtime_state，以及 command_receipts（总结命令去重）、private_outbox（持久私聊待发队列）。
+数据库包含 messages、summary_jobs、summaries、runtime_state，以及 command_receipts（有副作用命令去重）、private_outbox（持久私聊待发队列）。
 启动时执行 `app/storage/migrations.py` 中的小型事务迁移，无需删除旧数据库。
 旧 summary_jobs / summaries 自动增加 self_id：旧任务使用迁移时有效的 onebot_self_id 回填，旧总结从关联任务回填。
 没有有效绑定时，旧 queued/running 任务变成 failed，error 为 `missing self_id after schema migration`；
@@ -477,7 +484,9 @@ Phase 3 自动 triage 会发送相关消息文本、发送者 ID、原事件时�
 | Command | Purpose |
 | --- | --- |
 | `/help [命令]` | 分类帮助或单命令详情 |
-| `/status` | 连接、消息、附件、Inbox、DeepSeek、任务与运行时间 |
+| `/status` | 连接、消息、附件、Inbox、DeepSeek、任务与运行时间，以及简短 Health 提示 |
+| `/doctor` | 只读健康检查、队列年龄、worker 心跳与运行数据增长 |
+| `/outbox [failed]` | 发送队列或最近失败 producer 的安全元数据 |
 | `/coverage` | 采集缺口、恢复覆盖及周期核验状态 |
 | `/sync [群号]` | 对全部非 ignore 白名单群或指定群建立有限历史核验任务 |
 | `/summary <时间窗口>` | 总结开启 Summary 的群；支持 30m、2h、today |
@@ -896,6 +905,101 @@ Summary Detailed 和 Compact 均保留 Python coverage warning；LIKELY_COVERED 
 10. `/allow remove` 确认后新消息、历史读取、分类、下载及新提醒停止；旧 Inbox、附件和总结可查看。
 11. 重启，确认 YAML 中仍有的已移除群没有自动恢复；重新添加时显示将恢复的原策略。
 
+## Operational Health
+
+`/doctor` 是管理员只读健康检查：展示连接、`PRAGMA quick_check`、授权群、采集缺口、各任务状态、
+最近24小时失败数量、最老排队年龄、投递／Outbox、DeepSeek 最近结果、附件数量、磁盘记录大小与 worker 心跳。
+诊断不修复、删除、重试或修改配置，不调用 LLM；仅命令回复按原机制写入私聊 outbox。
+检查块独立失败，异常只显示错误类别。不会扫描聊天正文、计算附件哈希或递归遍历附件目录。
+附件容量使用数据库中已下载文件的记录总大小，可能与实际磁盘占用不同；DB 与 WAL 分开显示。
+
+`/outbox` 显示 ready、retrying（未到重试时刻）、deferred（等待分块前序等）、dead-letter producer 数与最老待发年龄。
+前三项按行／chunk 计数，互不重叠；dead-letter 按 producer 计数。`/outbox failed` 展示最近10个失败 producer：
+outbox ID、类型、键、错误类别、尝试次数、时间，不展示正文、模型回复、临时 QQ URL 或凭据。
+`/help doctor` 和 `/help outbox` 提供用法；`/status` 只增加简短 Health 提示。
+
+七个 worker（summary、attachment、configuration、history、triage、delivery、notifier）在成功完成实际循环后，
+最多每30秒记录一次心跳；超过基于正常任务超时设置的阈值显示 `⚠️ STALE`。没有用独立定时器掩盖阻塞。
+DeliveryWorker 按下一 heartbeat、收信时刻、延后提醒或进程内 Event 唤醒；等待期间不每秒扫描 Digest。
+Event 只是降低延迟，丢失 Event 最迟由下一 heartbeat 检查，重启从 SQLite 发现持久工作。
+
+增长审计展示 operational 表行数，不自动清理。删除 outbox、receipt、revision state、任务／提案等可能破坏
+去重、发送对账、来源关系或授权审计；本阶段不在缺乏完整保留策略时删除它们。
+
+## Outbox Priority
+
+Echelon Phase 4.5 开始使用 Outbox QoS。Python 按生产者类型与已验证的事项优先级决定发送优先级，LLM 无法设置队列优先级。
+通常顺序：CRITICAL Alert → HIGH Alert → Recovery Alert → Interactive Command Response → Manual Digest → Scheduled Digest → Summary → Background Notification。
+CRITICAL 回补也使用 CRITICAL 级别。内部整数不是用户 API 承诺。
+
+高优先级提醒可越过低优先级或尚未到重试时间的 producer。本实现允许在两个 chunk 之间插入更高优先级 producer，
+例如 Summary 1/3 → CRITICAL → Summary 2/3 → Summary 3/3；同一 producer 的后序 chunk 必须等待前序成功。
+已经发出的单个 OneBot 请求不能中途抢占，仍受 `websocket.action_timeout` 限制。
+
+每等待一分钟有限提高有效优先级，达到最高档后同档按 ID 排序，避免持续高优先级流量使旧总结永远饥饿。
+这是公平性措施，不承诺固定送达时间。旧行统一迁移为普通优先级，不根据正文猜 HIGH／CRITICAL。
+新文本、文件及所有长消息都有 producer 标识；无法恢复标识的旧无键行作为独立 ready 行调度，不从旧文本猜分块归属。
+
+## Outbox Failure Handling
+
+NapCat 未连接时 notifier 等待连接；文本发送中的 ConnectionError / TimeoutError 按指数退避持续重试，不因三次断线永久失败。
+明确 provider rejection、验证／权限及其他持续非网络错误消耗单独 terminal budget，默认三次后进入 dead-letter。
+暂时网络失败不消耗这一预算，也不会全局阻塞其他 ready 消息。
+
+```yaml
+outbox:
+  retry_base_seconds: 2
+  retry_max_seconds: 300
+  terminal_retry_limit: 3
+```
+
+Dead-letter 永久保留供 `/outbox failed` 查看，不自动删除，也不自动重新投递；当前不实现 `/outbox retry`。
+同一 producer 某个 chunk 最终失败，其余未发送 chunk 同时失败并记 `producer_chunk_failed`；已成功的 chunk 保留 sent。
+原文件发送继续保留既有有限尝试／安全取消规则；文本提示自身也受新的 terminal budget 约束。
+
+Dead-letter 仅表示某次管理员私聊投递没有成功完成，**不删除原始 Inbox、Summary、Attachment 或源消息**。
+Delivery / Digest 增加 failed_at、failure_reason，并提供 `inbox_delivery_status` / `digest_run_status` 的 `effective_status=failed`。
+这是兼容原 CHECK 的显式失败状态；未来读者应读取该视图或先判断 failed_at，不把基表历史 status 单独当成最终状态。
+失败修订保持去重记录，不通过下一 heartbeat／Digest 自动反复发送；新的实质修订仍按既有规则评估。
+
+新 outbox 必须有 self_id；NULL 仅属于 legacy rows，迁移不猜账号，仍兼容读取。新异步提案保存 source_request_id，
+提案、响应与 request completed 同事务；唯一索引防重复。旧提案来源保留 NULL，不从输入反推。
+命令 receipt / request 持久去重，重复 OneBot private message_id 不重复产生请求、提案或确认副作用。
+
+仍是 **best-effort duplicate suppression + persistent outbox**，无法保证 QQ 端到端 exactly-once：
+QQ 已接收而 ACK 丢失，或 ACK 成功后、sent_at 落盘前崩溃，都可能在恢复后重发。
+
+## Continuous Integration
+
+`.github/workflows/ci.yml` 在 push / pull_request 上为 windows-latest 的 Python 3.12 / 3.14 执行：
+锁定依赖安装、pytest、Ruff、compileall、pip check，以及 Git tracked 路径安全审计。
+使用 [actions/checkout](https://github.com/actions/checkout) 与 [actions/setup-python](https://github.com/actions/setup-python)。
+
+测试全部使用 mock / fake / test adapter，无需 DEEPSEEK_API_KEY、ONEBOT_ACCESS_TOKEN 或 ADMIN_QQ 凭据。
+测试网络保护拒绝外部 DNS／连接；回环地址仅用于测试服务器，真实启动子进程也安装同一保护。
+不会连接真实 QQ、NapCat 或 DeepSeek；安装依赖阶段仍需访问软件包源。
+CI 不上传数据库、日志、附件或 .env。审计允许空 `data/.gitkeep` / `logs/.gitkeep` 与占位 `.env.example`，禁止实际本地数据。
+本地通过与远端 CI 运行成功分别记录，见 [Phase 4.5 报告](PHASE4_5_REPORT.md)。
+
+## Production Readiness Checklist
+
+本阶段提供上线前基础，**不直接宣称 Production Ready**。至少核验：
+
+- 正常停服并备份整个 `data/`；确认 `.env` 不在 Git。
+- NapCat 使用 Universal WebSocket，`/allow` 授权群和 `/delivery` 设置／时区正确。
+- `/doctor` 关键项正常，`/coverage` 没有未处理的严重未知缺口，`/outbox` 没有长期未处理 dead-letter。
+- 使用真实测试群完成 HIGH、CRITICAL、deadline update、静默、手动和定时 Digest 验证。
+- 验证正常总结，以及短 max_messages 导致的安全失败提示（正确账号、群名、任务号）。
+- 在隔离测试环境模拟配置提案提交附近中断、provider rejection、长消息分块和普通通知重试；验证幂等、dead-letter 与高优先级插队。
+- 测试 NapCat 断开／恢复和 Echelon 重启，断线通知保留且恢复可继续。
+- 验证 Windows 开机自启动、磁盘剩余空间、附件目录增长情况与 DeepSeek API 可用性。
+
+建议选择一个 summary_only、一个 inbox、一个 priority 测试群，连续运行24–72小时。
+期间至少一次 NapCat 重启、一次 Echelon 重启、一次 DeepSeek 临时不可用模拟、HIGH、CRITICAL、deadline update、manual / scheduled digest。
+记录 `/doctor`、`/outbox`、`/coverage`，观察重连、回补、静默和磁盘增长。
+测试输入由用户正常发入群，Echelon 仍是被动只读观察者，不群回复、群上传或群管理。
+真实现场验收、持续运行和远端 CI 未执行时，一律标记 Not yet verified / Not yet performed。
+
 ## Roadmap
 
 | 阶段 | 状态 | 范围 |
@@ -904,8 +1008,9 @@ Summary Detailed 和 Compact 均保留 Python coverage warning；LIKELY_COVERED 
 | Phase 2 — Attachments & Inbox Foundation | ✅ Implemented | 附件、Inbox、管理员文件转发、Group Policy、Conversational Configuration |
 | Phase 2.5 — Reliability / History Recovery / Command UX | ✅ Implemented | 缺口检测、有限历史回补、周期核验、覆盖警告、统一帮助 |
 | Phase 3 — Intelligent Triage & Personal Preferences | ✅ Implemented | 消息聚合、categories、priorities、labels、deadline、personal preferences |
-| Phase 4 — Dynamic Authorization & Delivery Automation | Current | 动态授权、heartbeat、urgent/recovery alert、digest、quiet hours、分层总结 |
-| Phase 5 — Web Inbox | Planned | browser UI、search、filtering、archive、attachment management |
+| Phase 4 — Dynamic Authorization / Delivery Automation / Hierarchical Summary | ✅ Implemented | 动态授权、heartbeat、urgent/recovery alert、digest、quiet hours、分层总结 |
+| Phase 4.5 — Operational Hardening & Production Readiness | Current | Outbox QoS、有限失败、幂等修复、健康诊断、CI |
+| Phase 5 — Web Inbox | Planned | browser UI、search、filtering、archive、attachment management、summary browsing、delivery status |
 
 以下仍未实现：
 

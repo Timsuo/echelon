@@ -4,20 +4,23 @@ from zoneinfo import ZoneInfo
 
 from app.config import AppConfig
 from app.onebot.actions import ActionGateway
+from app.operations.diagnostics import health_warning
 from app.storage.inbox_repository import InboxRepository
 from app.storage.repository import Repository
 
 
 async def render_status(repository: Repository, actions: ActionGateway,
                         config: AppConfig, started_at: float) -> str:
-    rows = await repository.query("SELECT count(*) AS n FROM messages")
+    self_id = int(await repository.state("onebot_self_id") or 0)
+    warning = await health_warning(repository, actions)
+    rows = await repository.query("SELECT count(*) AS n FROM messages WHERE self_id=?", (self_id,))
     counts = {row["status"]: row["n"] for row in await repository.query(
-        "SELECT status,count(*) AS n FROM summary_jobs GROUP BY status")}
+        "SELECT status,count(*) AS n FROM summary_jobs WHERE self_id=? GROUP BY status", (self_id,))}
     last = await repository.state("last_received_at") or await repository.state("last_event_time")
     last_text = (datetime.fromtimestamp(float(last), ZoneInfo(config.timezone)).strftime(
         "%Y-%m-%d %H:%M:%S") if last else "尚未收到白名单群消息")
     health = await repository.state("deepseek_health") or "Unknown"
-    pending = await repository.query("SELECT count(*) AS n FROM private_outbox WHERE sent_at IS NULL")
+    pending = await repository.query("SELECT count(*) AS n FROM private_outbox WHERE sent_at IS NULL AND cancelled_at IS NULL AND dead_letter_at IS NULL AND (self_id=? OR self_id IS NULL)", (self_id,))
     minutes = max(0, int((time.time() - started_at) // 60))
     self_id = int(await repository.state("onebot_self_id") or 0)
     attachments = {row["download_status"]: row["n"] for row in await repository.query(
@@ -44,4 +47,4 @@ async def render_status(repository: Repository, actions: ActionGateway,
             f"\n\n收件箱：\nunread {unread}"
             f"\n\nAuthorized Groups：{len(authorized)}\nDelivery：Heartbeat {'Healthy' if healthy else 'Waiting'}"
             f"\nNext Digest：{stamp(next_digest(prefs, time.time(), config.timezone), config.timezone)}"
-            f"\nDeferred：{deferred}\n/allow · /delivery")
+            f"\nDeferred：{deferred}\nHealth：{'⚠️ /doctor 查看' if warning else '✅ OK'}\n/allow · /delivery")

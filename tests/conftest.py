@@ -10,6 +10,12 @@ from app.storage.db import Database
 from app.storage.repository import Repository
 
 
+@pytest.fixture(autouse=True)
+def no_external_network(monkeypatch):
+    from tests.network_guard import install
+    install(monkeypatch)
+
+
 @pytest.fixture
 async def repository(tmp_path):
     db = Database(tmp_path / "messages.db")

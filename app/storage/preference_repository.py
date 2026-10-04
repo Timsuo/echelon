@@ -5,6 +5,7 @@ import time
 
 from app.storage.history_repository import rows
 from app.storage.repository import Repository
+from app.storage.request_identity import request_exists, request_running
 from app.triage.models import PreferenceIntent, TriagePreferences
 
 logger = logging.getLogger(__name__)
@@ -69,17 +70,23 @@ class PreferenceRepository:
     async def queue(self, self_id: int, admin_qq: int, message_id: str, text: str) -> None:
         async with self.db.transaction() as connection:
             await self.policies._account(connection, self_id)
+            if await request_exists(connection, self_id, message_id):
+                return
             count = await rows(connection, "SELECT count(*) AS n FROM configuration_requests WHERE status IN ('queued','running')")
             if count[0]['n'] >= 20:
                 raise ValueError("配置解析队列已满，请稍后再试")
-            await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,kind) "
+            inserted = await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,kind) "
                 "VALUES (?,?,0,?,?,?,'triage_preferences') ON CONFLICT DO NOTHING", (self_id, admin_qq, message_id, text, time.time()))
+            if inserted.rowcount == 0:
+                return
             await Repository.enqueue_text(connection, "正在解析个人偏好；仅生成提案，/confirm 后才生效。", self_id)
 
     async def propose(self, request: dict, intent: PreferenceIntent) -> int | None:
         validate_preference_intent(intent, request['input_text'])
         async with self.db.transaction() as connection:
             await self.policies._account(connection, request['self_id'])
+            if not await request_running(connection, request['self_id'], request['admin_qq'], 'triage_preferences', request['id']):
+                return None
             current = await read_preferences(connection, request['self_id'])
             updated = intent.changes.apply(current)
             after = {key: value for key, value in updated.model_dump().items() if current.model_dump()[key] != value}
@@ -87,9 +94,9 @@ class PreferenceRepository:
             if after:
                 before = {key: current.model_dump()[key] for key in after}
                 data = dict(before=before, after=after)
-                identifier = (await rows(connection, "INSERT INTO configuration_proposals(self_id,admin_qq,intent_json,created_at,expires_at,kind) "
-                    "VALUES (?,?,?,?,?,'triage_preferences') RETURNING id", (request['self_id'], request['admin_qq'],
-                    json.dumps(data, ensure_ascii=False), time.time(), time.time() + 600)))[0]['id']
+                identifier = (await rows(connection, "INSERT INTO configuration_proposals(self_id,admin_qq,intent_json,created_at,expires_at,kind,source_request_id) "
+                    "VALUES (?,?,?,?,?,'triage_preferences',?) RETURNING id", (request['self_id'], request['admin_qq'],
+                    json.dumps(data, ensure_ascii=False), time.time(), time.time() + 600, request['id'])))[0]['id']
                 lines = ['【Echelon 偏好变更】']
                 for key, value in after.items():
                     lines.append(f"{key}: {json.dumps(before[key], ensure_ascii=False)} → {json.dumps(value, ensure_ascii=False)}")

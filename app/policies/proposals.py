@@ -7,6 +7,8 @@ from app.storage.authorization_repository import activate, deactivate, is_active
 from app.storage.history_repository import rows
 from app.storage.policy_repository import read_policy, save_policy
 from app.storage.preference_repository import apply_preference_proposal
+from app.storage.repository import Repository
+from app.storage.request_identity import claim_command
 
 
 async def apply_policy(connection, self_id, data):
@@ -54,26 +56,35 @@ class ConfigurationProposalService:
     def __init__(self, policies):
         self.policies = policies
 
-    async def resolve(self, self_id: int, admin_qq: int, identifier: int, confirm: bool) -> str:
+    async def resolve(self, self_id, admin_qq, identifier, confirm, message_id=None):
         async with self.policies.db.transaction() as connection:
             await self.policies._account(connection, self_id)
-            found = await rows(connection, 'SELECT * FROM configuration_proposals WHERE id=? AND self_id=? AND admin_qq=?',
-                               (identifier, self_id, admin_qq))
-            if not found:
-                raise ValueError('配置提案不存在')
-            proposal = found[0]
-            if proposal['status'] != 'pending':
-                return '该提案已处理：' + proposal['status']
-            if proposal['expires_at'] <= time.time():
+            if not await claim_command(connection, self_id, message_id):
+                return ''
+            text = await self.resolve_on(connection, self_id, admin_qq, identifier, confirm)
+            if message_id is not None:
+                await Repository.enqueue_text(connection, text, self_id)
+            self.policies.db.delivery_wakeup.set()
+            return text
+
+    async def resolve_on(self, connection, self_id, admin_qq, identifier, confirm):
+        found = await rows(connection, 'SELECT * FROM configuration_proposals WHERE id=? AND self_id=? AND admin_qq=?',
+                           (identifier, self_id, admin_qq))
+        if not found:
+            raise ValueError('配置提案不存在')
+        proposal = found[0]
+        if proposal['status'] != 'pending':
+            return '该提案已处理：' + proposal['status']
+        if proposal['expires_at'] <= time.time():
+            await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
+            return '配置提案已过期，请重新提交。'
+        if confirm:
+            handler = HANDLERS.get(proposal['kind'])
+            if handler is None:
+                raise ValueError('未知配置提案类型')
+            if not await handler(connection, self_id, json.loads(proposal['intent_json'])):
                 await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
-                return '配置提案已过期，请重新提交。'
-            if confirm:
-                handler = HANDLERS.get(proposal['kind'])
-                if handler is None:
-                    raise ValueError('未知配置提案类型')
-                if not await handler(connection, self_id, json.loads(proposal['intent_json'])):
-                    await connection.execute("UPDATE configuration_proposals SET status='expired' WHERE id=?", (identifier,))
-                    return '配置已发生变化，该提案已失效，请重新提交。'
-            await connection.execute('UPDATE configuration_proposals SET status=? WHERE id=?',
-                                     ('confirmed' if confirm else 'cancelled', identifier))
-            return '配置已更新。' if confirm else '配置提案已取消。'
+                return '配置已发生变化，该提案已失效，请重新提交。'
+        await connection.execute('UPDATE configuration_proposals SET status=? WHERE id=?',
+                                 ('confirmed' if confirm else 'cancelled', identifier))
+        return '配置已更新。' if confirm else '配置提案已取消。'

@@ -9,6 +9,7 @@ from app.policies.models import GroupPolicy
 from app.storage.history_repository import rows
 from app.storage.policy_repository import PolicyRepository, read_policy
 from app.storage.repository import Repository
+from app.storage.request_identity import claim_command, request_exists, request_running
 
 
 class AuthorizationChange(BaseModel):
@@ -21,9 +22,11 @@ class AuthorizationChange(BaseModel):
     policy: GroupPolicy
 
 
-async def propose_authorization(policies, self_id, admin_qq, group_id, operation, name=None):
+async def propose_authorization(policies, self_id, admin_qq, group_id, operation, name=None, request_id=None, message_id=None):
     async with policies.db.transaction() as connection:
         await policies._account(connection, self_id)
+        if not await request_running(connection, self_id, admin_qq, 'group_authorization', request_id) or not await claim_command(connection, self_id, message_id):
+            return None
         known = await rows(connection, 'SELECT * FROM group_authorizations WHERE self_id=? AND group_id=?', (self_id, group_id))
         current = known[0] if known else {}
         active = bool(current.get('active'))
@@ -33,8 +36,8 @@ async def propose_authorization(policies, self_id, admin_qq, group_id, operation
         change = AuthorizationChange(operation=operation, group_id=group_id, group_name=name or current.get('group_name'),
             before_active=active, before_updated_at=current.get('updated_at'), policy=policy.model_dump())
         now = time.time()
-        identifier = (await rows(connection, 'INSERT INTO configuration_proposals(self_id,admin_qq,kind,intent_json,created_at,expires_at) '
-            "VALUES (?,?,'group_authorization',?,?,?) RETURNING id", (self_id, admin_qq, change.model_dump_json(), now, now+600)))[0]['id']
+        identifier = (await rows(connection, 'INSERT INTO configuration_proposals(self_id,admin_qq,kind,intent_json,created_at,expires_at,source_request_id) '
+            "VALUES (?,?,'group_authorization',?,?,?,?) RETURNING id", (self_id, admin_qq, change.model_dump_json(), now, now+600, request_id)))[0]['id']
         text = [f'【Echelon 群授权变更】\n{operation.upper()} · {group_id}', change.group_name or str(group_id),
                 f'授权：{active} → {operation == "add"}']
         if operation == 'add':
@@ -45,6 +48,8 @@ async def propose_authorization(policies, self_id, admin_qq, group_id, operation
             text.append('停止新消息采集、历史核验、Triage、新附件下载和新的自动提醒。\n已有消息、Inbox、总结和已下载附件不会删除。')
         text.extend(['10分钟内确认：', f'/confirm {identifier}', f'/cancel {identifier}'])
         await Repository.enqueue_text(connection, '\n'.join(text), self_id)
+        if request_id is not None:
+            await connection.execute("UPDATE configuration_requests SET status='completed' WHERE id=? AND self_id=?", (request_id, self_id))
         return identifier
 
 
@@ -74,18 +79,22 @@ class AuthorizationCommands(PolicyCommands):
             raise ValueError('用法：/allow [add|remove <群号>]')
         group_id = self.identifier(parts[1])
         if parts[0] == 'remove':
-            await propose_authorization(self.policies, event.self_id, self.admin_qq, group_id, 'remove')
+            await propose_authorization(self.policies, event.self_id, self.admin_qq, group_id, 'remove', message_id=event.message_id)
         else:
             # Verification must not wait in the WebSocket receiver: it needs that
             # same receiver to deliver API responses. Use the existing work queue.
             async with self.repository.db.transaction() as connection:
                 await self.policies._account(connection, event.self_id)
+                if await request_exists(connection, event.self_id, event.message_id):
+                    return
                 count = await rows(connection, "SELECT count(*) AS n FROM configuration_requests WHERE status IN ('queued','running')")
                 if count[0]['n'] >= 20:
                     raise ValueError('配置解析队列已满，请稍后再试')
-                await connection.execute('INSERT INTO configuration_requests(self_id,admin_qq,group_id,target_group_id,message_id,input_text,created_at,kind) '
+                inserted = await connection.execute('INSERT INTO configuration_requests(self_id,admin_qq,group_id,target_group_id,message_id,input_text,created_at,kind) '
                     "VALUES (?,?,?,?,?,'add',?,'group_authorization') ON CONFLICT DO NOTHING",
                     (event.self_id, self.admin_qq, group_id, group_id, event.message_id, time.time()))
+                if inserted.rowcount == 0:
+                    return
                 await Repository.enqueue_text(connection, '正在验证机器人群成员身份；完成后发送授权提案，确认前不生效。', event.self_id)
 
 
@@ -93,6 +102,4 @@ async def verify_request(policies: PolicyRepository, actions, request):
     if actions is None:
         raise ValueError('OneBot 连接不可用')
     name = await GroupVerifier(actions).verify(request['self_id'], request['target_group_id'])
-    await propose_authorization(policies, request['self_id'], request['admin_qq'], request['target_group_id'], 'add', name)
-    async with policies.db.transaction() as connection:
-        await connection.execute("UPDATE configuration_requests SET status='completed' WHERE id=?", (request['id'],))
+    await propose_authorization(policies, request['self_id'], request['admin_qq'], request['target_group_id'], 'add', name, request_id=request['id'])

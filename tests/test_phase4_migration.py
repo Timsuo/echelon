@@ -14,6 +14,7 @@ async def phase3_database(path, monkeypatch):
         pass
     with monkeypatch.context() as patch:
         patch.setattr('app.storage.db.migrate_delivery', no_phase4)
+        patch.setattr('app.storage.db.migrate_operational', no_phase4)
         db = Database(path)
         await db.open()
         await db.close()

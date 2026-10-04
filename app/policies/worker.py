@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from app.llm.deepseek import DeepSeekClient, SummaryError
+from app.operations.health import beat
 from app.policies.parser import ConfigIntentParser
 from app.storage.policy_repository import PolicyRepository
 from app.storage.preference_repository import PreferenceRepository
@@ -48,6 +49,7 @@ class ConfigurationWorker:
                     await self.execute(request)
                 else:
                     await asyncio.sleep(1)
+                await beat(self.repository.db, 'configuration')
             except asyncio.CancelledError:
                 logger.info("Configuration worker stopped")
                 raise

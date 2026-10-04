@@ -60,4 +60,4 @@ class SummaryService:
         except Exception as error:
             safe_error = str(error) if isinstance(error, SummaryError) else type(error).__name__
             logger.error("Summary job failed id=%s reason=%s", job["id"], safe_error)
-            await self.repository.fail_job(job["id"], safe_error)
+            await self.repository.fail_job(job, safe_error)

@@ -7,8 +7,10 @@ from pathlib import Path
 import aiosqlite
 from anyio import CancelScope
 
+from app.operations.health import WorkerHealth
 from app.storage.delivery_schema import migrate_delivery
 from app.storage.migrations import migrate_history, migrate_phase2, migrate_self_id
+from app.storage.operational_schema import migrate_operational
 from app.storage.schema import SCHEMA
 from app.storage.triage_schema import migrate_triage
 
@@ -20,6 +22,8 @@ class Database:
         self.path = path
         self.lock = asyncio.Lock()
         self.connection: aiosqlite.Connection | None = None
+        self.delivery_wakeup = asyncio.Event()
+        self.health = WorkerHealth(self)
 
     async def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,6 +41,7 @@ class Database:
             await migrate_history(connection)
             await migrate_triage(connection)
             await migrate_delivery(connection)
+            await migrate_operational(connection)
         logger.info("DB initialized")
 
     @asynccontextmanager

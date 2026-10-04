@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.14']
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: python -m pip install -r requirements.lock.txt -e ".[test]"
+      - name: Check tracked local data
+        run: python scripts/check_tracked_files.py
+      - name: Tests (mock services only)
+        run: python -m pytest -q --basetemp=.pytest_tmp/ci
+      - name: Lint
+        run: python -m ruff check app tests
+      - name: Compile
+        run: python -m compileall -q app
+      - name: Dependency consistency
+        run: python -m pip check

@@ -59,7 +59,7 @@ async def test_complete_and_restart_recovery(processor, repository, config):
 
 
 async def test_outbox_survives_restart(repository):
-    await repository.notify("result")
+    await repository.notify("result", 88)
     item = await repository.next_notification()
     await repository.notification_result(item, "ConnectionError")
     await repository.db.close()

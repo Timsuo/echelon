@@ -6,6 +6,7 @@ from app.policies.models import POLICY_FIELDS, ConfigIntent, GroupPolicy
 from app.storage.authorization_repository import active_ids, is_active
 from app.storage.db import Database
 from app.storage.repository import Repository
+from app.storage.request_identity import claim_command, request_exists, request_running
 
 logger = logging.getLogger(__name__)
 enqueue_text = Repository.enqueue_text
@@ -71,9 +72,11 @@ class PolicyRepository:
             raise ValueError("机器人账号不匹配，未应用配置")
 
     async def propose(self, self_id: int, admin_qq: int, group_id: int, intent: ConfigIntent,
-                      request_id: int | None = None) -> int | None:
+                      request_id: int | None = None, message_id: str | None = None) -> int | None:
         async with self.db.transaction() as connection:
             await self._account(connection, self_id)
+            if not await request_running(connection, self_id, admin_qq, 'group_policy', request_id) or not await claim_command(connection, self_id, message_id):
+                return None
             await self.check_group(self_id, group_id, connection)
             current = await read_policy(connection, self_id, group_id)
             after = {key: value for key, value in intent.changes.expanded().items()
@@ -82,8 +85,8 @@ class PolicyRepository:
                 data = dict(group_id=group_id, before={key: getattr(current, key) for key in after}, after=after)
                 now = time.time()
                 async with connection.execute("INSERT INTO configuration_proposals"
-                    "(self_id,admin_qq,intent_json,created_at,expires_at) VALUES (?,?,?,?,?)",
-                    (self_id, admin_qq, json.dumps(data, ensure_ascii=False), now, now + 600)) as cursor:
+                    "(self_id,admin_qq,intent_json,created_at,expires_at,source_request_id) VALUES (?,?,?,?,?,?)",
+                    (self_id, admin_qq, json.dumps(data, ensure_ascii=False), now, now + 600, request_id)) as cursor:
                     identifier = cursor.lastrowid
                 await enqueue_text(connection, render_proposal(identifier, data), self_id)
                 logger.info("Configuration proposal created id=%s group=%s", identifier, group_id)
@@ -95,19 +98,23 @@ class PolicyRepository:
                                          (request_id, self_id))
             return identifier
 
-    async def resolve(self, self_id: int, admin_qq: int, identifier: int, confirm: bool) -> str:
+    async def resolve(self, self_id: int, admin_qq: int, identifier: int, confirm: bool, message_id=None) -> str:
         from app.policies.proposals import ConfigurationProposalService
-        return await ConfigurationProposalService(self).resolve(self_id, admin_qq, identifier, confirm)
+        return await ConfigurationProposalService(self).resolve(self_id, admin_qq, identifier, confirm, message_id)
 
     async def queue(self, self_id: int, admin_qq: int, group_id: int, message_id: str, text: str) -> None:
         async with self.db.transaction() as connection:
             await self._account(connection, self_id)
+            if await request_exists(connection, self_id, message_id):
+                return
             await self.check_group(self_id, group_id, connection)
             async with connection.execute("SELECT count(*) FROM configuration_requests WHERE status IN ('queued','running')") as cursor:
                 if (await cursor.fetchone())[0] >= 20:
                     raise ValueError("配置解析队列已满，请稍后再试")
-            await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,target_group_id) "
+            inserted = await connection.execute("INSERT INTO configuration_requests(self_id,admin_qq,group_id,message_id,input_text,created_at,target_group_id) "
                 "VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING", (self_id, admin_qq, group_id, message_id, text, time.time(), group_id))
+            if inserted.rowcount == 0:
+                return
             await enqueue_text(connection, "正在解析配置意图；完成后将发送提案，确认前不会修改配置。", self_id)
 
     async def recover(self) -> None:
@@ -127,7 +134,9 @@ class PolicyRepository:
 
     async def failed(self, request: dict, error: str) -> None:
         async with self.db.transaction() as connection:
-            await connection.execute("UPDATE configuration_requests SET status='failed',error=? WHERE id=?", (error, request["id"]))
+            async with connection.execute("UPDATE configuration_requests SET status='failed',error=? WHERE id=? AND self_id=? AND status='running' RETURNING id", (error, request["id"], request['self_id'])) as cursor:
+                if await cursor.fetchone() is None:
+                    return
             hint = {'triage_preferences': '请用 /pref 明确说明偏好后重试。',
                     'delivery_preferences': '请用 /notify 明确说明投递时间或开关后重试。',
                     'group_authorization': '请确认机器人已加入该群且 OneBot 在线，再用 /allow add 重试。'}.get(

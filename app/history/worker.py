@@ -5,6 +5,7 @@ import time
 from app.onebot.actions import ActionRejectedError
 from app.onebot.events import EventProcessor
 from app.onebot.history import HistoryAdapter
+from app.operations.health import beat
 from app.storage.history_repository import HistoryRepository
 from app.storage.policy_repository import PolicyRepository
 
@@ -79,6 +80,7 @@ class HistoryWorker:
             try:
                 actions = self.adapter.actions
                 if not actions.connected or actions.self_id is None:
+                    await beat(self.repository.db, 'history')
                     await asyncio.sleep(1)
                     continue
                 if time.monotonic() >= next_schedule:
@@ -88,6 +90,7 @@ class HistoryWorker:
                 if job:
                     await self.execute(job)
                 await self.repository.report_ready(actions.self_id)
+                await beat(self.repository.db, 'history')
                 await asyncio.sleep(self.config.history.request_interval_seconds if job else 1)
             except asyncio.CancelledError:
                 logger.info("History worker stopped; interrupted jobs resume on startup")

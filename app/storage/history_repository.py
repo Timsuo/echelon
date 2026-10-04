@@ -3,6 +3,7 @@ import time
 
 from app.config import AppConfig
 from app.history.renderer import recovery_report
+from app.notifier.priority import OutboxPriority
 from app.storage.authorization_repository import active_ids, is_active
 from app.storage.policy_repository import read_policy
 from app.storage.repository import Repository
@@ -211,7 +212,7 @@ class HistoryRepository:
                 return
             jobs = await rows(connection, "SELECT j.* FROM history_sync_jobs j JOIN collection_gaps g ON g.id=j.gap_id "
                 "WHERE g.self_id=? AND g.reported_at IS NULL", (self_id,))
-            await Repository.enqueue_text(connection, recovery_report(gaps, jobs, self.config.timezone), self_id)
+            await Repository.enqueue_text(connection, recovery_report(gaps, jobs, self.config.timezone), self_id, producer_kind='history', priority=OutboxPriority.BACKGROUND)
             await connection.execute("UPDATE collection_gaps SET reported_at=? WHERE self_id=? AND reported_at IS NULL", (now, self_id))
 
     async def unresolved(self, self_id: int, group_id: int, start: float, end: float) -> list[dict]:

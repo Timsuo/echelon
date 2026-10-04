@@ -17,6 +17,8 @@ async def test_real_server_startup(tmp_path):
         port = reservation.getsockname()[1]
     script = """
 import sys
+from tests.network_guard import install
+install()
 from pathlib import Path
 import uvicorn
 from app.application import create_app

@@ -182,6 +182,7 @@ class TriageRepository:
             await connection.execute("UPDATE triage_jobs SET status='completed',completed_at=?,error=NULL,result_json=? WHERE id=? AND self_id=?",
                                      (time.time(), result.model_dump_json(), job['id'], job['self_id']))
             logger.info("Triage applied job=%s items=%s", job['id'], len(result.items))
+        self.db.delivery_wakeup.set()
 
     async def fail(self, job: dict, error: str, retry: bool) -> None:
         retry = retry and job['attempts'] <= self.config.triage.retry_count

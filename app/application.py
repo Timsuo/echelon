@@ -68,7 +68,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             configure_logging(root / "logs", settings.logging.level, credentials)
             logger.info("Service starting")
             await database.open()
-            repository = Repository(database, settings.triage, settings.groups.allowed)
+            repository = Repository(database, settings.triage, settings.groups.allowed, settings.outbox)
             history = HistoryRepository(repository, settings)
             await history.startup()
             await repository.recover()
@@ -96,6 +96,11 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             delivery_worker = DeliveryWorker(DeliveryRepository(repository, settings))
             service = SummaryService(repository, client, settings)
             app.state.services = Services(credentials, repository, actions, events, history)
+            model_budget = settings.deepseek.timeout * (settings.deepseek.retries+1) + 120
+            await database.health.start(dict(summary=model_budget, configuration=max(model_budget, 2*settings.websocket.action_timeout+60),
+                triage=settings.deepseek.timeout+120, attachment=settings.websocket.action_timeout+360,
+                history=settings.websocket.action_timeout+120, delivery=120,
+                notifier=settings.websocket.action_timeout+120))
             tasks = [asyncio.create_task(run_worker(repository, service), name="summary-worker"),
                      asyncio.create_task(run_notifier(repository, actions, credentials.admin_qq),
                                          name="private-notifier")]
@@ -123,6 +128,7 @@ def create_app(config: AppConfig | None = None, secrets: Secrets | None = None,
             finally:
                 try:
                     if history:
+                        await database.health.stop()
                         await history.stop()
                 finally:
                     try:

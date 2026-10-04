@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from app.llm.deepseek import DeepSeekClient, RetryableModelOutputError, retryable
+from app.operations.health import beat
 from app.storage.history_repository import HistoryRepository
 from app.storage.policy_repository import PolicyRepository
 from app.storage.triage_repository import TriageRepository
@@ -56,6 +57,7 @@ class TriageWorker:
                 if job:
                     await self.execute(job)
                 await asyncio.sleep(1)
+                await beat(self.repository.db, 'triage')
             except asyncio.CancelledError:
                 logger.info("Triage worker stopped; ownership retained for restart")
                 raise

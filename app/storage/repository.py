@@ -1,9 +1,11 @@
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
 from app.attachments.models import GroupFileReference
-from app.config import AttachmentConfig, TriageConfig
+from app.config import AttachmentConfig, OutboxConfig, TriageConfig
+from app.notifier.priority import OutboxPriority
 from app.storage.authorization_repository import (
     GroupAuthorizationRepository,
     active_version,
@@ -15,8 +17,9 @@ from app.storage.inbox_repository import ingest_files
 
 
 class Repository:
-    def __init__(self, db: Database, triage_config: TriageConfig | None = None, authorization_seed=()) -> None:
+    def __init__(self, db: Database, triage_config: TriageConfig | None = None, authorization_seed=(), outbox_config=None) -> None:
         self.db = db
+        self.outbox_config = outbox_config or OutboxConfig()
         self.authorization_seed = tuple(authorization_seed)
         self.authorizations = GroupAuthorizationRepository(db)
         self.triage_config = triage_config or TriageConfig()
@@ -100,27 +103,32 @@ class Repository:
             if matches:
                 await bootstrap(connection, self_id, self.authorization_seed)
                 await connection.execute("INSERT INTO delivery_settings SELECT ?,started_at,NULL,started_at FROM phase4_settings WHERE id=1 ON CONFLICT DO NOTHING", (self_id,))
+            self.db.delivery_wakeup.set()
             return matches
 
     @staticmethod
-    async def enqueue_text(connection: Any, text: str, self_id: int | None = None, *, producer_kind: str | None = None,
-                           producer_key: str | None = None) -> None:
+    async def enqueue_text(connection: Any, text: str, self_id: int, *, producer_kind: str | None = None,
+                           producer_key: str | None = None, priority: OutboxPriority = OutboxPriority.INTERACTIVE) -> None:
+        if type(self_id) is not int or self_id <= 0:
+            raise ValueError('New outbox rows require a valid self_id')
+        producer_kind = producer_kind or 'interactive'
+        producer_key = producer_key or uuid.uuid4().hex
         # Plain text segments are used at delivery; split without interpreting CQ codes.
         parts = [text[i:i + 1800] for i in range(0, len(text), 1800)]
         for index, part in enumerate(parts, 1):
             prefix = f"({index}/{len(parts)})\n" if len(parts) > 1 else ""
             await connection.execute(
-                "INSERT INTO private_outbox(text,created_at,self_id,producer_kind,producer_key,producer_chunk) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING",
-                (prefix + part, time.time(), self_id, producer_kind, producer_key, index))
+                "INSERT INTO private_outbox(text,created_at,self_id,producer_kind,producer_key,producer_chunk,priority) VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+                (prefix + part, time.time(), self_id, producer_kind, producer_key, index, int(priority)))
 
-    async def notify(self, text: str, self_id: int | None = None) -> None:
+    async def notify(self, text: str, self_id: int) -> None:
         async with self.db.transaction() as connection:
             await self.enqueue_text(connection, text, self_id)
 
     async def enqueue_file(self, self_id: int, attachment_id: int) -> None:
-        rows = await self.query("INSERT INTO private_outbox(text,created_at,kind,self_id,attachment_id) "
-            "SELECT '',?,'file',self_id,id FROM attachments WHERE self_id=? AND id=? "
-            "AND download_status='downloaded' RETURNING id", (time.time(), self_id, attachment_id))
+        rows = await self.query("INSERT INTO private_outbox(text,created_at,kind,self_id,attachment_id,priority,producer_kind,producer_key,producer_chunk) "
+            "SELECT '',?,'file',self_id,id,?,'file',?,1 FROM attachments WHERE self_id=? AND id=? "
+            "AND download_status='downloaded' RETURNING id", (time.time(), int(OutboxPriority.INTERACTIVE), uuid.uuid4().hex, self_id, attachment_id))
         if not rows:
             raise ValueError("附件尚未准备完成或不属于当前账号。")
 
@@ -163,7 +171,8 @@ class Repository:
                     "VALUES (?,?,?,?,'queued',?)", (self_id, group, start, end, time.time())
                 ) as cursor:
                     ids.append(cursor.lastrowid)
-            await self.enqueue_text(connection, f"总结已排队，任务：{', '.join(map(str, ids))}", self_id)
+            text = f"总结已排队，任务：{', '.join(map(str, ids))}" if ids else "当前没有符合条件的群可以创建总结任务。\n请检查 /allow 和 /groups。"
+            await self.enqueue_text(connection, text, self_id)
             return ids
 
     async def claim_job(self) -> dict[str, Any] | None:
@@ -232,11 +241,12 @@ class Repository:
                 (detailed, compact.model_dump_json(), compact_text, identifier))
             await connection.execute("UPDATE summary_jobs SET status='completed',completed_at=?,error=NULL WHERE id=?", (time.time(), job['id']))
             await self.enqueue_text(connection, detailed if len(detailed) <= config.summary.compact_threshold_chars else compact_text,
-                                    job['self_id'], producer_kind='summary', producer_key=str(identifier))
+                                    job['self_id'], producer_kind='summary', producer_key=str(identifier), priority=OutboxPriority.SUMMARY)
             return identifier
 
     async def complete_job(self, job: dict, model: str, count: int,
                            summary_json: str, text: str) -> None:
+        """Deprecated legacy v1 compatibility only. Production uses complete_summary."""
         async with self.db.transaction() as connection:
             if not await is_active(connection, job['self_id'], job['group_id']):
                 raise PermissionError('Summary authorization removed')
@@ -248,30 +258,42 @@ class Repository:
             await connection.execute(
                 "UPDATE summary_jobs SET status='completed',completed_at=?,error=NULL WHERE id=?",
                 (time.time(), job["id"]))
-            await self.enqueue_text(connection, text, job['self_id'])
+            await self.enqueue_text(connection, text, job['self_id'], producer_kind='summary', priority=OutboxPriority.SUMMARY)
 
-    async def fail_job(self, job_id: int, error: str) -> None:
+    async def fail_job(self, job: dict, error: str) -> None:
+        from app.commands.saved_summaries import group_name
+        safe_reasons = {'消息数量超限，请缩短总结窗口', '聊天内容过长，请缩短总结窗口',
+                        '该群策略已暂停总结', '目标群已从白名单移除', '内部存储故障，请查看日志'}
+        stored_error = error if error in safe_reasons or (error.isascii() and error.isidentifier() and len(error) <= 80) else 'SummaryError'
         async with self.db.transaction() as connection:
-            await connection.execute(
-                "UPDATE summary_jobs SET status='failed',completed_at=?,error=? WHERE id=?",
-                (time.time(), error, job_id))
-            await self.enqueue_text(connection, f"总结任务 #{job_id} 失败：{error}。群消息仍保留。")
+            self_id = job.get('self_id')
+            if type(self_id) is not int or self_id <= 0:
+                # Recover only the job's persisted identity, never the current account.
+                async with connection.execute('SELECT self_id,group_id FROM summary_jobs WHERE id=?', (job['id'],)) as cursor:
+                    persisted = await cursor.fetchone()
+                if persisted is None:
+                    return
+                job = {**job, 'self_id': persisted['self_id'], 'group_id': persisted['group_id']}
+            async with connection.execute(
+                "UPDATE summary_jobs SET status='failed',completed_at=?,error=? WHERE id=? AND self_id IS ? "
+                "AND status IN ('queued','running') RETURNING id", (time.time(), stored_error, job['id'], job['self_id'])) as cursor:
+                if await cursor.fetchone() is None:
+                    return
+            if type(job['self_id']) is not int or job['self_id'] <= 0:
+                # An unresolved legacy job can fail without creating an unowned outbox row.
+                return
+            name, _ = await group_name(connection, job['self_id'], job['group_id'])
+            reason = error if error in safe_reasons else '处理失败，请用 /doctor 查看状态或稍后重试'
+            await self.enqueue_text(connection, f"【📝 总结失败】\n群：{name}\n任务：#{job['id']}\n原因：{reason}\n群消息仍保留。",
+                                    job['self_id'], producer_kind='summary', priority=OutboxPriority.SUMMARY)
 
     async def record_retry(self, job_id: int) -> None:
         await self.query("UPDATE summary_jobs SET retry_count=retry_count+1 WHERE id=?", (job_id,))
 
-    async def next_notification(self) -> dict | None:
-        # One sender per process, guaranteed by process lock. Keep chunk ordering.
-        rows = await self.query("SELECT * FROM private_outbox WHERE sent_at IS NULL AND cancelled_at IS NULL "
-            "AND (self_id IS NULL OR self_id=CAST((SELECT value FROM runtime_state WHERE key='onebot_self_id') AS INTEGER)) "
-            "ORDER BY id LIMIT 1")
-        return rows[0] if rows and rows[0]["next_attempt"] <= time.time() else None
+    async def next_notification(self, now=None) -> dict | None:
+        from app.storage.outbox_repository import next_notification
+        return await next_notification(self, now)
 
-    async def notification_result(self, item: dict, error: str | None = None) -> None:
-        if error is None:
-            await self.query("UPDATE private_outbox SET sent_at=?,error=NULL WHERE id=?",
-                             (time.time(), item["id"]))
-        else:
-            delay = min(300, 2 ** min(item["attempts"] + 1, 9))
-            await self.query("UPDATE private_outbox SET attempts=attempts+1,error=?,next_attempt=? "
-                             "WHERE id=?", (error, time.time() + delay, item["id"]))
+    async def notification_result(self, item: dict, error: str | None = None, *, transient=False) -> None:
+        from app.storage.outbox_repository import notification_result
+        await notification_result(self, item, error, transient=transient)

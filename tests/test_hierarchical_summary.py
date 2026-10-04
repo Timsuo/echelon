@@ -292,7 +292,7 @@ async def test_digest_optional_group_overview_is_brief(enabled, repository, proc
 async def test_summary_real_id_not_failed_job_id(repository, processor, config):
     await repository.queue_summaries(88, 'bad', [123], 1, 2)
     job = await repository.claim_job()
-    await repository.fail_job(job['id'], 'fixture')
+    await repository.fail_job(job, 'fixture')
     saved, _ = await generate(repository, processor, config)
     assert saved['id'] != saved['job_id']
     assert f"#{saved['id']}】" in saved['rendered_text']

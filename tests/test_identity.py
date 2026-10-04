@@ -36,7 +36,7 @@ def test_pending_outbox_not_sent_to_wrong_account(tmp_path, config):
     with TestClient(app) as client:
         services = app.state.services
         client.portal.call(services.repository.bind_onebot, 88)
-        client.portal.call(services.repository.notify, "pending private result")
+        client.portal.call(services.repository.notify, "pending private result", 88)
         services.actions.attach = Mock(wraps=services.actions.attach)
         services.actions.call = AsyncMock(wraps=services.actions.call)
         with pytest.raises(WebSocketDisconnect):

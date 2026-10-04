@@ -8,6 +8,7 @@ from app.commands.delivery import DeliveryCommands
 from app.commands.help import COMMANDS, render_help
 from app.commands.history import HistoryCommands
 from app.commands.inbox import InboxCommands
+from app.commands.operations import OperationalCommands
 from app.commands.policies import PolicyCommands
 from app.commands.preferences import PreferenceCommands
 from app.commands.status import render_status
@@ -37,7 +38,9 @@ class CommandRouter:
         preferences = PreferenceCommands(repository, None, admin_qq)
         authorization = AuthorizationCommands(repository, admin_qq)
         delivery = DeliveryCommands(repository, config, admin_qq)
+        operations = OperationalCommands(repository, actions, config)
         handlers: dict[str, CommandHandler] = {
+            "/doctor": operations.doctor, "/outbox": operations.outbox,
             "/allow": authorization.allow, "/delivery": delivery.delivery, "/notify": delivery.notify, "/digest": delivery.digest,
             "/help": self.help, "/coverage": history.coverage, "/sync": history.sync,
             "/status": self.status, "/summary": self.summary,
@@ -67,6 +70,12 @@ class CommandRouter:
         if handler is None:
             await self.repository.notify("未知命令。\n\n发送 /help 查看 Echelon 支持的命令。", event.self_id)
             return
+        if name in {'/summary', '/digest', '/config', '/pref', '/notify', '/allow', '/confirm', '/cancel'}:
+            seen = await self.repository.query('SELECT 1 FROM command_receipts WHERE self_id=? AND message_id=? '
+                'UNION ALL SELECT 1 FROM configuration_requests WHERE self_id=? AND message_id=? LIMIT 1',
+                (event.self_id, event.message_id, event.self_id, event.message_id))
+            if seen:
+                return
         try:
             await handler(event, argument)
         except ValueError as error:
@@ -80,7 +89,7 @@ class CommandRouter:
         if argument:
             raise ValueError("用法：/status")
         await self.repository.notify(await render_status(
-            self.repository, self.actions, self.config, self.started_at))
+            self.repository, self.actions, self.config, self.started_at), event.self_id)
 
     async def summary(self, event: MessageEvent, argument: str) -> None:
         from app.commands.saved_summaries import SavedSummaryCommands
@@ -89,7 +98,5 @@ class CommandRouter:
         start, end = parse_window(argument, datetime.now(UTC), self.config.timezone)
         policies = await PolicyRepository(self.repository.db).listing(event.self_id)
         groups = [p.group_id for p in policies if p.mode != "ignore" and p.summary_enabled]
-        if not groups:
-            raise ValueError("当前没有启用总结的群，请查看 /groups")
         jobs = await self.repository.queue_summaries(event.self_id, event.message_id, groups, start, end)
         logger.info("Summary jobs queued ids=%s", jobs)

@@ -56,7 +56,7 @@ class PolicyCommands:
         except ValidationError as error:
             raise ValueError("配置字段格式不合法") from error
         if intent:
-            await self.policies.propose(event.self_id, self.admin_qq, group_id, intent)
+            await self.policies.propose(event.self_id, self.admin_qq, group_id, intent, message_id=event.message_id)
         else:
             await self.policies.queue(event.self_id, self.admin_qq, group_id, event.message_id, argument)
 
@@ -68,5 +68,4 @@ class PolicyCommands:
 
     async def finish(self, event: MessageEvent, argument: str, confirm: bool) -> None:
         await self.account(event)
-        text = await self.policies.resolve(event.self_id, self.admin_qq, self.identifier(argument), confirm)
-        await self.repository.notify(text, event.self_id)
+        await self.policies.resolve(event.self_id, self.admin_qq, self.identifier(argument), confirm, event.message_id)

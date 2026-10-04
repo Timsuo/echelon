@@ -13,6 +13,10 @@ class CommandSpec:
 
 
 COMMANDS = (
+    CommandSpec("doctor", "/doctor", "只读健康诊断",
+        "只读检查数据库 quick_check、连接、队列数量与年龄、worker 心跳及运行数据增长。\n不修复、不清理、不重试、不调用模型。", ("/doctor",), "状态与可靠性"),
+    CommandSpec("outbox", "/outbox [failed]", "发送队列状态",
+        "查看可发送、重试、延后和 Dead Letter。/outbox failed 列出最近10个失败 producer 的安全元数据。\n不展示消息正文；当前不提供手动重试。", ("/outbox", "/outbox failed"), "状态与可靠性"),
     CommandSpec("allow", "/allow [add|remove <群号>]", "动态管理采集授权",
         "add/remove 都先生成提案，10分钟内 /confirm 才生效。添加前验证机器人已在群内。新群默认 SUMMARY_ONLY。\n"
         "remove 停止未来采集、历史核验、分类、下载与新的投递，但保留历史。重新添加会展示并恢复原策略。\n"

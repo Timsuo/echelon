@@ -6,8 +6,10 @@ import unicodedata
 from app.delivery.preferences import read_delivery_preferences
 from app.delivery.renderer import render_alert, render_digest
 from app.delivery.schedule import quiet_end, slots
+from app.notifier.priority import OutboxPriority
 from app.storage.authorization_repository import active_ids, is_active
 from app.storage.history_repository import HistoryRepository, rows
+from app.storage.outbox_repository import reconcile_failures
 from app.storage.policy_repository import read_policy
 from app.storage.preference_repository import read_preferences
 from app.storage.repository import Repository
@@ -61,8 +63,9 @@ class DeliveryRepository:
         self.repository, self.db, self.config = repository, repository.db, config
 
     async def reconcile(self, connection, self_id, now):
+        await reconcile_failures(connection, self_id, now)
         for table, producer in (('inbox_deliveries', 'delivery'), ('digest_runs', 'digest')):
-            await connection.execute(f"UPDATE {table} SET status='delivered',delivered_at=? WHERE self_id=? AND status='enqueued' "
+            await connection.execute(f"UPDATE {table} SET status='delivered',delivered_at=? WHERE self_id=? AND status='enqueued' AND failed_at IS NULL "
                 "AND EXISTS (SELECT 1 FROM private_outbox o WHERE o.self_id=? AND o.producer_kind=? AND o.producer_key=CAST("+table+".id AS TEXT)) "
                 "AND NOT EXISTS (SELECT 1 FROM private_outbox o WHERE o.self_id=? AND o.producer_kind=? AND o.producer_key=CAST("+table+".id AS TEXT) AND (o.sent_at IS NULL OR o.cancelled_at IS NOT NULL))",
                 (now, self_id, self_id, producer, self_id, producer))
@@ -92,7 +95,7 @@ class DeliveryRepository:
             key = fingerprint(item)
             decision = 'not_eligible'
             if await eligible(connection, item, prefs, origin, now):
-                prior = await rows(connection, "SELECT * FROM inbox_deliveries WHERE self_id=? AND inbox_item_id=? AND status IN ('enqueued','delivered') ORDER BY id DESC LIMIT 1", (self_id, item['id']))
+                prior = await rows(connection, "SELECT * FROM inbox_deliveries WHERE self_id=? AND inbox_item_id=? AND status IN ('enqueued','delivered') AND failed_at IS NULL ORDER BY id DESC LIMIT 1", (self_id, item['id']))
                 kind = 'recovery' if origin['source_kind'] != 'realtime' else ('urgent_update' if prior else 'urgent')
                 until = quiet_end(prefs, now, self.config.timezone)
                 override = getattr(prefs, item['priority']+'_break_quiet_hours')
@@ -122,7 +125,7 @@ class DeliveryRepository:
                 await connection.execute("UPDATE inbox_deliveries SET status='deferred',scheduled_for=? WHERE id=?", (until, delivery['id']))
                 continue
             # Preference changes can end quiet hours early; re-evaluation is intentional.
-            previous = await rows(connection, "SELECT snapshot_json FROM inbox_deliveries WHERE self_id=? AND inbox_item_id=? AND id!=? AND status IN ('enqueued','delivered') ORDER BY id DESC LIMIT 1",
+            previous = await rows(connection, "SELECT snapshot_json FROM inbox_deliveries WHERE self_id=? AND inbox_item_id=? AND id!=? AND status IN ('enqueued','delivered') AND failed_at IS NULL ORDER BY id DESC LIMIT 1",
                                   (self_id, item['id'], delivery['id']))
             gaps = await HistoryRepository.unresolved_on(connection, self_id, item['source_group_id'], origin['window_start'], origin['window_end'])
             coverage = [g['coverage'] for g in gaps]
@@ -130,7 +133,9 @@ class DeliveryRepository:
                 coverage = ['unknown']
             text = render_alert(item, delivery['kind'], json.loads(previous[0]['snapshot_json']) if previous else None,
                                 coverage, self.config.timezone, now, origin['event_time'])
-            await Repository.enqueue_text(connection, text, self_id, producer_kind='delivery', producer_key=str(delivery['id']))
+            priority = (OutboxPriority.CRITICAL if item['priority'] == 'critical' else
+                        OutboxPriority.RECOVERY if delivery['kind'] == 'recovery' else OutboxPriority.HIGH)
+            await Repository.enqueue_text(connection, text, self_id, producer_kind='delivery', producer_key=str(delivery['id']), priority=priority)
             await connection.execute("UPDATE inbox_deliveries SET status='enqueued',enqueued_at=?,item_revision=?,snapshot_json=? WHERE id=?",
                 (now, item['revision'], json.dumps(item, ensure_ascii=False), delivery['id']))
 
@@ -162,6 +167,7 @@ class DeliveryRepository:
                 return None
             identifier = await self.create_digest_on(connection, self_id, 'manual', now, now, settings['delivery_start_at'])
             await Repository.enqueue_text(connection, f'已创建手动收信任务 #{identifier}。', self_id)
+            self.db.delivery_wakeup.set()
             return identifier
 
     async def digest(self, connection, self_id, prefs, now):
@@ -189,7 +195,7 @@ class DeliveryRepository:
             for group_id in await active_ids(connection, self_id):
                 warnings.extend(await HistoryRepository.unresolved_on(connection, self_id, group_id, run['window_start'], run['window_end']))
             for item in items:
-                urgent = await rows(connection, "SELECT 1 FROM inbox_deliveries WHERE self_id=? AND inbox_item_id=? AND fingerprint=? AND status IN ('enqueued','delivered')",
+                urgent = await rows(connection, "SELECT 1 FROM inbox_deliveries WHERE self_id=? AND inbox_item_id=? AND fingerprint=? AND status IN ('enqueued','delivered') AND failed_at IS NULL",
                                     (self_id, item['id'], fingerprint(item)))
                 item['was_urgent'] = bool(urgent)
                 if item['coverage_status'] == 'warning':
@@ -204,7 +210,8 @@ class DeliveryRepository:
                     (run['id'], self_id, item['id'], item['revision'], item['was_urgent'], json.dumps(item, ensure_ascii=False)))
             text = render_digest(run, items, overviews, warnings, self.config.timezone)
             # Selection, snapshots, outbox chunks and producer state commit together.
-            await Repository.enqueue_text(connection, text, self_id, producer_kind='digest', producer_key=str(run['id']))
+            await Repository.enqueue_text(connection, text, self_id, producer_kind='digest', producer_key=str(run['id']),
+                priority=OutboxPriority.MANUAL_DIGEST if run['kind'] == 'manual' else OutboxPriority.SCHEDULED_DIGEST)
             await connection.execute("UPDATE digest_runs SET status='enqueued',enqueued_at=?,rendered_text=?,coverage_status=? WHERE id=?",
                 (now, text, 'warning' if warnings else 'no_known_gap', run['id']))
 
@@ -248,3 +255,23 @@ class DeliveryRepository:
             await self.schedule(connection, self_id, prefs, settings, now)
             await self.digest(connection, self_id, prefs, now)
             return prefs.heartbeat_seconds
+
+    async def next_due(self, self_id, heartbeat_at):
+        from app.delivery.schedule import next_digest
+        now = time.time()
+        async with self.db.transaction() as connection:
+            prefs = await read_delivery_preferences(connection, self_id)
+            due = [heartbeat_at]
+            if await rows(connection, "SELECT 1 FROM digest_runs WHERE self_id=? AND kind='manual' AND status='queued' LIMIT 1", (self_id,)):
+                return now
+            if prefs.enabled:
+                pending = await rows(connection, "SELECT MIN(scheduled_for) AS due FROM inbox_deliveries WHERE self_id=? AND status IN ('queued','deferred')", (self_id,))
+                if pending[0]['due'] is not None:
+                    due.append(pending[0]['due'])
+                if prefs.digest_enabled:
+                    scheduled = next_digest(prefs, now, self.config.timezone)
+                    if scheduled is not None:
+                        due.append(scheduled)
+                    if await rows(connection, "SELECT 1 FROM digest_runs WHERE self_id=? AND kind!='manual' AND status IN ('queued','deferred') LIMIT 1", (self_id,)):
+                        due.append(quiet_end(prefs, now, self.config.timezone) or now)
+            return max(now, min(due))

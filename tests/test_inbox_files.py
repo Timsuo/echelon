@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import itertools
 import os
 from unittest.mock import AsyncMock
 
@@ -45,8 +46,11 @@ def gateway(repository, storage):
     return actions, socket
 
 
+_command_ids = itertools.count(10000)
+
+
 def command(text, user_id=99, self_id=88):
-    return MessageEvent.model_validate(event(message_type="private", message=text, user_id=user_id, self_id=self_id))
+    return MessageEvent.model_validate(event(message_type="private", message=text, user_id=user_id, self_id=self_id, message_id=next(_command_ids)))
 
 
 async def test_private_file_allowed_only_for_admin(processor, repository, tmp_path):

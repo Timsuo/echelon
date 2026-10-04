@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from app.onebot.actions import ActionGateway
+from app.operations.health import beat
 from app.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ async def deliver_notification(repository: Repository, actions: ActionGateway, a
         if is_file and (isinstance(error, (PermissionError, FileNotFoundError, ValueError)) or item["attempts"] >= 2):
             await repository.cancel_notification(item, type(error).__name__)
         else:
-            await repository.notification_result(item, type(error).__name__)
+            await repository.notification_result(item, type(error).__name__, transient=isinstance(error, (ConnectionError, TimeoutError)))
     else:
         await repository.notification_result(item)
         if is_file:
@@ -33,13 +34,16 @@ async def run_notifier(repository: Repository, actions: ActionGateway, admin_qq:
     while True:
         try:
             if not actions.connected:
+                await beat(repository.db, 'notifier')
                 await asyncio.sleep(1)
                 continue
             item = await repository.next_notification()
             if item is None:
+                await beat(repository.db, 'notifier')
                 await asyncio.sleep(0.5)
                 continue
             await deliver_notification(repository, actions, admin_qq, item)
+            await beat(repository.db, 'notifier')
             await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             logger.info("Private notifier stopped")
