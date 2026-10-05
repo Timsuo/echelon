@@ -29,7 +29,9 @@ jobs:
       - name: Check tracked local data
         run: python scripts/check_tracked_files.py
       - name: Tests (mock services only)
-        run: python -m pytest -q --basetemp=.pytest_tmp/ci
+        run: |
+          python -c "from pathlib import Path; Path('.pytest_tmp').mkdir(exist_ok=True)"
+          python -m pytest -q --basetemp=.pytest_tmp/ci
       - name: Lint
         run: python -m ruff check app tests
       - name: Compile

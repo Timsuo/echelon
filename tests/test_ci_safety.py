@@ -1,5 +1,8 @@
 import ast
+import shlex
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -31,6 +34,27 @@ def test_ci_workflow_has_both_triggers_and_offline_checks():
         assert required in commands
     assert not any('upload-artifact' in step.get('uses', '') for step in job['steps'])
     assert 'secrets.' not in str(document)
+
+
+def test_ci_test_step_works_without_existing_temp_directory(tmp_path):
+    document = yaml.load((ROOT/'.github/workflows/ci.yml').read_text(encoding='utf-8'), Loader=yaml.BaseLoader)
+    step = next(step for step in document['jobs']['test']['steps']
+                if step.get('name') == 'Tests (mock services only)')
+    checkout = tmp_path / 'clean-checkout'
+    checkout.mkdir()
+    (checkout / 'test_smoke.py').write_text(
+        'def test_temp_directory(tmp_path):\n    assert tmp_path.is_dir()\n', encoding='utf-8')
+    assert not (checkout / '.pytest_tmp').exists()
+    # Execute the workflow's actual Python commands against a tiny tmp_path test.
+    # This catches missing parent directories before any application fixture runs.
+    for line in step['run'].splitlines():
+        arguments = shlex.split(line)
+        assert arguments[0] == 'python'
+        if arguments[1:3] == ['-m', 'pytest']:
+            arguments.append('test_smoke.py')
+        result = subprocess.run([sys.executable, *arguments[1:]], cwd=checkout,
+                                capture_output=True, text=True, encoding='utf-8', timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_external_network_and_dns_guard():
